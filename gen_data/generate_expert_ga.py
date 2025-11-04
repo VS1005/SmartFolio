@@ -322,10 +322,17 @@ def generate_expert_strategy_ga(returns: np.ndarray,
                                 correlation_matrix: np.ndarray,
                                 risk_category: str = 'moderate',
                                 ga_generations: int = 30,
-                                verbose: bool = False) -> np.ndarray:
+                                verbose: bool = False,
+                                output_weights: bool = True) -> np.ndarray:
     """
     Generate expert portfolio using GA for stock selection
-    Returns: Multi-hot binary vector (compatible with your action space)
+    
+    Args:
+        output_weights: If True, return continuous weights. If False, return binary selection.
+    
+    Returns: 
+        Continuous weight vector (sums to 1) if output_weights=True
+        Multi-hot binary vector if output_weights=False
     """
     # Select risk category
     if risk_category == 'conservative':
@@ -358,7 +365,31 @@ def generate_expert_strategy_ga(returns: np.ndarray,
         verbose=verbose
     )
     
-    return best_chromosome  # Multi-hot binary vector
+    if output_weights:
+        # Convert binary selection to continuous weights
+        # Use risk-adjusted weighting: higher return stocks get higher weights
+        selected_indices = np.where(best_chromosome == 1)[0]
+        weights = np.zeros(len(returns))
+        
+        if len(selected_indices) > 0:
+            # Weight by Sharpe ratio (return / volatility)
+            selected_returns = returns[selected_indices]
+            
+            # Simple approach: weight proportional to returns (positive weighting)
+            # Add offset to ensure all positive
+            min_return = selected_returns.min()
+            if min_return < 0:
+                adjusted_returns = selected_returns - min_return + 0.01
+            else:
+                adjusted_returns = selected_returns + 0.01
+            
+            # Normalize to sum to 1
+            stock_weights = adjusted_returns / adjusted_returns.sum()
+            weights[selected_indices] = stock_weights
+        
+        return weights
+    else:
+        return best_chromosome  # Binary multi-hot
 
 
 def generate_expert_trajectories_ga(args,
@@ -403,22 +434,27 @@ def generate_expert_trajectories_ga(args,
         current_risk = np.random.choice(risk_categories) if risk_category == 'mixed' else risk_category
         
         try:
-            # GA-based expert (returns multi-hot binary)
+            # GA-based expert (now returns continuous weights)
             expert_actions = generate_expert_strategy_ga(
                 returns=returns,
                 industry_relation_matrix=ind_matrix,
                 correlation_matrix=correlation_matrix,
                 risk_category=current_risk,
                 ga_generations=ga_generations,
-                verbose=False
+                verbose=False,
+                output_weights=True  # Get continuous weights
             )
         except Exception as e:
             print(f"Warning: Trajectory {traj_idx} failed: {e}")
-            # Fallback: top returns
+            # Fallback: weight by top returns
             n_select = min(12, len(returns))
-            expert_actions = np.zeros(len(returns), dtype=int)
+            expert_actions = np.zeros(len(returns), dtype=np.float32)
             top_indices = np.argsort(-returns)[:n_select]
-            expert_actions[top_indices] = 1
+            # Proportional weighting by returns
+            top_returns = returns[top_indices]
+            if top_returns.min() < 0:
+                top_returns = top_returns - top_returns.min() + 0.01
+            expert_actions[top_indices] = top_returns / top_returns.sum()
         
         # Create flattened state (matching new observation format)
         state_parts = []
@@ -445,9 +481,23 @@ def generate_expert_trajectories_ga(args,
     
     print(f"\n✓ Generated {len(expert_trajectories)} trajectories")
     
-    # Statistics
-    avg_selected = np.mean([np.sum(a) for _, a in expert_trajectories])
-    print(f"  Average stocks selected: {avg_selected:.1f}")
+    # Statistics for continuous weights
+    all_weights = [a for _, a in expert_trajectories]
+    avg_weight_sum = np.mean([np.sum(w) for w in all_weights])
+    avg_nonzero = np.mean([np.sum(w > 0.01) for w in all_weights])  # Stocks with >1% allocation
+    max_concentration = np.mean([np.max(w) for w in all_weights])  # Average max single allocation
+    
+    print(f"  Weight statistics:")
+    print(f"    - Average sum: {avg_weight_sum:.4f} (should be ~1.0)")
+    print(f"    - Avg stocks with >1% allocation: {avg_nonzero:.1f}")
+    print(f"    - Avg max single stock weight: {max_concentration:.1%}")
+    
+    # Show sample weights for debugging
+    sample_weights = all_weights[0]
+    top_5_idx = np.argsort(-sample_weights)[:5]
+    print(f"  Sample portfolio (first trajectory):")
+    for i, idx in enumerate(top_5_idx):
+        print(f"    Stock {idx}: {sample_weights[idx]:.3%}")
     
     return expert_trajectories
 

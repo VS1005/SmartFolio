@@ -34,17 +34,18 @@ class StockPortfolioEnv(gym.Env):
         self.pos_yn = pos_yn
         self.neg_yn = neg_yn
 
-        # # 动作空间：连续值，范围 [0, 1]
-        # # 含义：股票 score
-        # self.action_space = spaces.Box(low=0,
-        #                                high=1,
-        #                                shape=(self.num_stocks,),
-        #                                dtype=np.float32)
+        # Action space: continuous weights for each stock
+        # Output raw scores, will be normalized via softmax to sum to 1
+        # SB3 requires finite bounds, use large range [-10, 10] which is sufficient for softmax
+        self.action_space = spaces.Box(
+            low=-10.0,  # Scores before softmax
+            high=10.0,  # After softmax, will become valid probabilities in [0, 1]
+            shape=(self.num_stocks,),
+            dtype=np.float32
+        )
 
-        # 允许选择固定数量的股票（如 10%）
-        self.top_k = max(1, int(0.1 * self.num_stocks))  # 每次选择的股票数
-        # 动作空间：离散，表示选择的股票索引
-        self.action_space = spaces.MultiDiscrete([self.num_stocks] * self.top_k)
+        # Optional: store for compatibility if needed
+        self.top_k = max(1, int(0.1 * self.num_stocks))  # Can be used for constraints later
 
         # 部分可观测
         # 观测空间：股票特征及各个关系图
@@ -143,22 +144,31 @@ class StockPortfolioEnv(gym.Env):
             # load s'
             self.current_step += 1
             self.load_observation(ind_yn=self.ind_yn, pos_yn=self.pos_yn, neg_yn=self.neg_yn)
-            # MultiDiscrete 下，根据 actions 进行选股
-            selected_indices = list(set(actions))  # 去重
+            
+            # Continuous action space: normalize to portfolio weights
+            # actions: [num_stocks] raw scores from policy
+            # Apply softmax to ensure weights sum to 1 and are non-negative
+            action_scores = np.array(actions).flatten()
+            
+            # Softmax normalization: w_i = exp(a_i) / sum(exp(a_j))
+            exp_actions = np.exp(action_scores - np.max(action_scores))  # Numerical stability
+            weights = exp_actions / exp_actions.sum()
+            
+            # Optional: Apply concentration penalty or top-K constraint
+            # For now, allow full continuous allocation
+            
             if self.mode == "test":
-                print(self.current_step)
-                print(selected_indices)
-            weights = np.zeros(self.num_stocks)
-            weights[selected_indices] = 1.0 / len(selected_indices)  # 选中的股票等权分配
+                print(f"Step {self.current_step}")
+                print(f"Weights (top 5): {sorted(zip(range(len(weights)), weights), key=lambda x: x[1], reverse=True)[:5]}")
+                print(f"Weight sum: {weights.sum():.6f}")
+                print(f"Non-zero allocations: {(weights > 0.01).sum()}/{len(weights)}")
 
             # 使用IRL奖励函数替代原始奖励计算
             if self.reward_net is not None:
                 # self.observation is already flattened [obs_len]
                 state_tensor = torch.FloatTensor(self.observation).to(self.device)  # 当前状态
-                # 将动作（权重向量）转换为 multi-hot 编码，输入奖励函数进行计算
-                action_multi_hot = np.zeros(self.num_stocks)
-                action_multi_hot[selected_indices] = 1
-                action_tensor = torch.FloatTensor(action_multi_hot).to(self.device)  # 动作（权重向量）
+                # Pass actual weights (continuous) instead of multi-hot
+                action_tensor = torch.FloatTensor(weights).to(self.device)  # 动作（权重向量）
                 
                 # Pass wealth information for drawdown calculation
                 wealth_info = torch.FloatTensor([self.net_value, self.peak_value]).to(self.device)
@@ -166,6 +176,7 @@ class StockPortfolioEnv(gym.Env):
                 with torch.no_grad():
                     self.reward = self.reward_net(state_tensor, action_tensor, wealth_info).mean().cpu().item()
             else:
+                # Portfolio return: weighted sum of individual stock returns
                 self.reward = np.dot(weights, np.array(self.ror))
 
             self.net_value *= (1 + self.reward)

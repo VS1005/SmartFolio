@@ -108,7 +108,7 @@ if __name__ == '__main__':
     args.test_start_date = '2024-01-02'
     args.test_end_date = '2024-12-30'
     args.batch_size = 32
-    args.max_epochs = 20
+    args.max_epochs = 5
     args.seed = 123
     args.input_dim = 6
     args.ind_yn = True

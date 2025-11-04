@@ -72,19 +72,20 @@ class MaxEntIRL:
         # obs is now 1D flattened: [num_envs, obs_len]
         # For DummyVecEnv, obs shape is [1, obs_len]
         
-        # Determine num_stocks from action space
-        num_stocks = env.action_space.nvec[0]  # First dimension of MultiDiscrete action space
+        # Determine num_stocks from action space (now Box, not MultiDiscrete)
+        num_stocks = env.action_space.shape[0]  # Box space has shape attribute
         
         for _ in range(batch_size):
             action, _ = model.predict(obs)
             next_obs, reward, done, _ = env.step(action)
 
-            # 转换为 Multi-Hot 编码
-            action_multi_hot = np.zeros(num_stocks)
-            for i in range(action.shape[1]):
-                action_multi_hot[action[:, i]] = 1
+            # action is now continuous weights [num_envs, num_stocks]
+            # Normalize to ensure sum to 1 (apply softmax)
+            action_scores = action[0]  # Get first env's action
+            exp_actions = np.exp(action_scores - np.max(action_scores))
+            action_weights = exp_actions / exp_actions.sum()
 
-            trajectories.append((obs.copy(), action_multi_hot))
+            trajectories.append((obs.copy(), action_weights))
             obs = next_obs
             if done:
                 obs = env.reset()
@@ -270,10 +271,10 @@ def create_env_init(args, dataset=None, data_loader=None):
 
 
 PPO_PARAMS = {
-        "n_steps": 1024,
+        "n_steps": 128,  # Reduced from 1024 to prevent OOM with large obs space
         "ent_coef": 0.005,
         "learning_rate": 1e-4,
-        "batch_size": 128,
+        "batch_size": 64,  # Reduced from 128 to match n_steps/2
         "gamma": 0.5,
         "tensorboard_log": "./logs",
     }
@@ -382,7 +383,7 @@ def train_model_and_predict(model, args, train_loader, val_loader, test_loader):
             print(f"Training RL agent for {rl_timesteps} timesteps...")
             trained_model = model.learn(total_timesteps=rl_timesteps)
             # 可选评估：留给环境统计输出
-            mean_reward, std_reward = evaluate_policy(trained_model, env_train, n_eval_episodes=5)
+            mean_reward, std_reward = evaluate_policy(trained_model, env_train, n_eval_episodes=1)
             print(f"Evaluation after RL training: Mean Reward = {mean_reward:.4f}, Std Reward = {std_reward:.4f}")
     # Save reward network checkpoint
     try:
