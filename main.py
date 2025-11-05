@@ -102,15 +102,14 @@ if __name__ == '__main__':
 
     # debug 用参数设置
     args.model_name = 'SmartFolio'
-    args.market = 'hs300'
     args.relation_type = 'hy'
     args.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    args.train_start_date = '2020-01-02'
-    args.train_end_date = '2023-01-01'
-    args.val_start_date = '2023-01-02'
+    args.train_start_date = '2020-01-06'
+    args.train_end_date = '2023-01-31'
+    args.val_start_date = '2023-02-01'
     args.val_end_date = '2023-12-29'
     args.test_start_date = '2024-01-02'
-    args.test_end_date = '2024-12-30'
+    args.test_end_date = '2024-12-26'
     args.batch_size = 64
     args.max_epochs = 10
     args.seed = 123
@@ -167,6 +166,7 @@ if __name__ == '__main__':
     os.makedirs(args.save_dir, exist_ok=True)
 
     if args.market == 'hs300':
+        print("Setting num_stocks for HS300")
         args.num_stocks = 102
     elif args.market == 'zz500':
         args.num_stocks = 80
@@ -204,7 +204,7 @@ if __name__ == '__main__':
         else:
             raise ValueError(f"Unknown market {args.market} and data directory {data_dir} does not exist")
 
-    trained_model = train_predict(args, predict_dt='2025-02-05')
+    trained_model = train_predict(args, predict_dt='2024-12-30')
     # save PPO model checkpoint
     try:
         ts = time.strftime('%Y%m%d_%H%M%S')
