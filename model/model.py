@@ -1,14 +1,15 @@
-import pandas as pd
 import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from torch.nn.modules.module import Module
 import math
 
+
 class Transpose(nn.Module):
     def forward(self, x):
         batch_size = x.shape[0]
         return x.view(batch_size, -1)
+
 
 class MHGraphAttn(Module):
     def __init__(self, in_features, out_features, negative_slope=0.2, num_heads=4, bias=True, residual=True):
@@ -22,22 +23,21 @@ class MHGraphAttn(Module):
         self.leaky_relu = nn.LeakyReLU(negative_slope=negative_slope)
         self.residual = residual
         if self.residual:
-            self.project = nn.Linear(in_features, num_heads*out_features)
+            self.project = nn.Linear(in_features, num_heads * out_features)
         else:
             self.project = None
         if bias:
             self.bias = Parameter(torch.FloatTensor(1, num_heads * out_features))
         else:
-            self.register_parameter('bias', None)
+            self.register_parameter("bias", None)
         self.reset_parameters()
-        self.linear = nn.Linear(num_heads*out_features, num_heads*out_features)
 
     def reset_parameters(self):
-        stdv = 1. / math.sqrt(self.weight.size(-1))
+        stdv = 1.0 / math.sqrt(self.weight.size(-1))
         if self.bias is not None:
             self.bias.data.uniform_(-stdv, stdv)
         self.weight.data.uniform_(-stdv, stdv)
-        stdv = 1. / math.sqrt(self.weight_u.size(-1))
+        stdv = 1.0 / math.sqrt(self.weight_u.size(-1))
         self.weight_u.data.uniform_(-stdv, stdv)
         self.weight_v.data.uniform_(-stdv, stdv)
 
@@ -50,151 +50,160 @@ class MHGraphAttn(Module):
         f_1 = torch.matmul(support, self.weight_u).reshape(batch, self.num_heads, 1, -1)
         f_2 = torch.matmul(support, self.weight_v).reshape(batch, self.num_heads, -1, 1)
         logits = f_1 + f_2
-        weight = self.leaky_relu(logits)    # (batch_size, num_heads, num_nodes, num_nodes)
+        weight = self.leaky_relu(logits)
         masked_weight = torch.matmul(weight, adj_mat.unsqueeze(1)).to_sparse()
         attn_weights = torch.sparse.softmax(masked_weight, dim=3).to_dense()
-        support = torch.matmul(attn_weights, support)   # (batch_size,num_heads, num_nodes, hidden_size)
+        support = torch.matmul(attn_weights, support)
         support = support.permute(dims=(0, 2, 1, 3)).reshape(batch, -1, self.num_heads * self.out_features)
         if self.bias is not None:
             support = support + self.bias
         if self.residual:
             support = support + self.project(inputs)
-        # support = torch.tanh(self.linear(torch.tanh(support)))      # (batch_size, num_nodes, hidden_size)
         support = torch.tanh(support)
         if require_weights:
             return support, attn_weights
-        else:
-            return support, None
+        return support, None
+
 
 class PairNorm(nn.Module):
-    def __init__(self, mode='PN', scale=1):
-        assert mode in ['None', 'PN', 'PN-SI', 'PN-SCS']
+    def __init__(self, mode="PN", scale=1):
+        assert mode in ["None", "PN", "PN-SI", "PN-SCS"]
         super(PairNorm, self).__init__()
         self.mode = mode
         self.scale = scale
 
     def forward(self, x):
-        if self.mode == 'None':
+        if self.mode == "None":
             return x
         col_mean = x.mean(dim=1, keepdim=True)
-        if self.mode == 'PN':
+        if self.mode == "PN":
             x = x - col_mean
             rownorm_mean = (1e-6 + x.pow(2).sum(dim=2).mean()).sqrt()
             x = self.scale * x / rownorm_mean
-        if self.mode == 'PN-SI':
+        if self.mode == "PN-SI":
             x = x - col_mean
             rownorm_individual = (1e-6 + x.pow(2).sum(dim=2, keepdim=True)).sqrt()
             x = self.scale * x / rownorm_individual
-        if self.mode == 'PN-SCS':
+        if self.mode == "PN-SCS":
             rownorm_individual = (1e-6 + x.pow(2).sum(dim=2, keepdim=True)).sqrt()
             x = self.scale * x / rownorm_individual - col_mean
         return x
 
+
 class HeteFusionAttn(Module):
     def __init__(self, in_features, hidden_size=128, act=nn.Tanh()):
         super(HeteFusionAttn, self).__init__()
-        self.project = nn.Sequential(nn.Linear(in_features, hidden_size),
-                                     act,
-                                     nn.Linear(hidden_size, 1, bias=False))
+        self.project = nn.Sequential(
+            nn.Linear(in_features, hidden_size),
+            act,
+            nn.Linear(hidden_size, 1, bias=False),
+        )
 
     def forward(self, inputs, require_weights=False):
+        # inputs: [batch, num_types, num_nodes, features]
         w = self.project(inputs)
         beta = torch.softmax(w, dim=1)
+        fused = (beta * inputs).sum(1)
         if require_weights:
-            return (beta * inputs).sum(1), beta
-        else:
-            return (beta * inputs).sum(1), None
+            return fused, beta
+        return fused, None
 
-class HGAT(nn.Module):
-    def __init__(self, num_stocks, n_features=8, num_heads=8, hidden_dim=512, no_ind=False, no_neg=False, input_dim=6):
-        super(HGAT, self).__init__()
+
+class TemporalHGAT(nn.Module):
+    def __init__(self, num_stocks, input_dim=6, lookback=30,
+                 hidden_dim=128, num_heads=4, no_ind=False, no_neg=False):
+        super(TemporalHGAT, self).__init__()
+        self.lookback = lookback
+        self.num_stocks = num_stocks
+        self.input_dim = input_dim
         self.num_heads = num_heads
-        self.n_adj_mat = num_stocks
-        self.in_features = n_features
-        self.out_features = n_features
-        self.hidden_dim = hidden_dim
-        self.input_dim = input_dim  # Store the per-stock feature dimension
-        self.ind_gat = MHGraphAttn(
-            in_features=hidden_dim, out_features=n_features, num_heads=num_heads)
-        self.pos_gat = MHGraphAttn(
-            in_features=hidden_dim, out_features=n_features, num_heads=num_heads)
-        self.neg_gat = MHGraphAttn(
-            in_features=hidden_dim, out_features=n_features, num_heads=num_heads)
-
-        # mlp_self1 transforms raw input features to hidden_dim
-        self.mlp_self1 = nn.Linear(input_dim, hidden_dim)
-        self.ind_mlp = nn.Linear(n_features*num_heads, hidden_dim)
-        self.pos_mlp = nn.Linear(n_features * num_heads, hidden_dim)
-        self.neg_mlp = nn.Linear(n_features*num_heads, hidden_dim)
-        self.mlp_self2 = nn.Linear(hidden_dim, hidden_dim)
-        self.leaky_relu = nn.LeakyReLU()
-
-        self.pn = PairNorm(mode='PN-SI')
-        self.sem_gat = HeteFusionAttn(in_features=hidden_dim, hidden_size=hidden_dim, act=nn.Tanh())
-        self.generator = nn.Sequential(
-            Transpose(),
-            nn.Linear(num_stocks * hidden_dim, num_stocks),
-            nn.Sigmoid()
-        )
         self.no_ind = no_ind
         self.no_neg = no_neg
+
+        # Temporal encoder
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=1,
+            batch_first=True,
+        )
+
+        # Spatial encoder
+        self.ind_gat = MHGraphAttn(hidden_dim, hidden_dim, num_heads=num_heads)
+        self.pos_gat = MHGraphAttn(hidden_dim, hidden_dim, num_heads=num_heads)
+        self.neg_gat = MHGraphAttn(hidden_dim, hidden_dim, num_heads=num_heads)
+
+        self.ind_mlp = nn.Linear(hidden_dim * num_heads, hidden_dim)
+        self.pos_mlp = nn.Linear(hidden_dim * num_heads, hidden_dim)
+        self.neg_mlp = nn.Linear(hidden_dim * num_heads, hidden_dim)
+
+        self.sem_gat = HeteFusionAttn(in_features=hidden_dim, hidden_size=hidden_dim)
+        self.pn = PairNorm(mode="PN-SI")
+
+        # Output head per node
+        self.output_head = nn.Linear(hidden_dim, 1)
+
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight, gain=0.02)
 
     def forward(self, inputs, require_weights=False):
+        # Observation layout: [ind, pos, neg, ts_flat]
         batch = inputs.shape[0]
-        # Observation layout: [ind_matrix, pos_matrix, neg_matrix, features]
-        # Each matrix: num_stocks*num_stocks, features: num_stocks*input_dim
-        # Total: 3*num_stocks^2 + num_stocks*input_dim
-        
-        obs_len = inputs.shape[1]
-        expected_len = 3 * self.n_adj_mat * self.n_adj_mat + self.n_adj_mat * self.input_dim
-        if obs_len != expected_len:
-            raise ValueError(f"HGAT expects observation length {expected_len} but got {obs_len}. "
-                           f"Check num_stocks={self.n_adj_mat} and input_dim={self.input_dim}.")
-        
-        # Parse flattened observation
-        ptr = 0
-        ind_adj_flat = inputs[:, ptr:ptr + self.n_adj_mat * self.n_adj_mat]
-        ptr += self.n_adj_mat * self.n_adj_mat
-        pos_adj_flat = inputs[:, ptr:ptr + self.n_adj_mat * self.n_adj_mat]
-        ptr += self.n_adj_mat * self.n_adj_mat
-        neg_adj_flat = inputs[:, ptr:ptr + self.n_adj_mat * self.n_adj_mat]
-        ptr += self.n_adj_mat * self.n_adj_mat
-        features_flat = inputs[:, ptr:]
-        
-        # Reshape to [batch, num_stocks, num_stocks] for adjacency
-        ind_adj = ind_adj_flat.reshape(batch, self.n_adj_mat, self.n_adj_mat)
-        pos_adj = pos_adj_flat.reshape(batch, self.n_adj_mat, self.n_adj_mat)
-        neg_adj = neg_adj_flat.reshape(batch, self.n_adj_mat, self.n_adj_mat)
-        
-        # Reshape to [batch, num_stocks, input_dim] for features
-        features = features_flat.reshape(batch, self.n_adj_mat, self.input_dim)
+        adj_size = self.num_stocks * self.num_stocks
 
-        support = self.mlp_self1(features)
-        ind_support, ind_attn_weights = self.ind_gat(support, ind_adj, require_weights)
-        pos_support, pos_attn_weights = self.pos_gat(support, pos_adj, require_weights)
-        neg_support, neg_attn_weights = self.neg_gat(support, neg_adj, require_weights)
-        support = self.mlp_self2(support)
-        ind_support = self.ind_mlp(ind_support)
-        pos_support = self.pos_mlp(pos_support)
-        neg_support = self.neg_mlp(neg_support)
-        all_embedding = torch.stack((support, ind_support, pos_support, neg_support),
-                                    dim=1)
-        if self.no_ind:
-            all_embedding = torch.stack((support, neg_support), dim=1)
-        if self.no_neg:
-            all_embedding = torch.stack((support, ind_support), dim=1)
-        all_embedding, sem_attn_weights = self.sem_gat(all_embedding, require_weights)     # (batch, num_nodes, 64)
-        all_embedding = self.pn(all_embedding)
-        weights = self.generator(all_embedding)
+        expected_len = 3 * adj_size + self.num_stocks * self.lookback * self.input_dim
+        if inputs.shape[1] != expected_len:
+            raise ValueError(
+                f"TemporalHGAT expected obs length {expected_len} (num_stocks={self.num_stocks}, "
+                f"lookback={self.lookback}, input_dim={self.input_dim}) but got {inputs.shape[1]}"
+            )
+
+        ptr = 0
+        ind_adj = inputs[:, ptr:ptr + adj_size].reshape(batch, self.num_stocks, self.num_stocks)
+        ptr += adj_size
+        pos_adj = inputs[:, ptr:ptr + adj_size].reshape(batch, self.num_stocks, self.num_stocks)
+        ptr += adj_size
+        neg_adj = inputs[:, ptr:ptr + adj_size].reshape(batch, self.num_stocks, self.num_stocks)
+        ptr += adj_size
+
+        ts_flat = inputs[:, ptr:]
+        ts_features = ts_flat.reshape(batch * self.num_stocks, self.lookback, self.input_dim)
+
+        # Temporal encoding
+        _, (h_n, _) = self.lstm(ts_features)
+        node_embeddings = h_n[-1].reshape(batch, self.num_stocks, -1)
+
+        # Spatial encoding
+        ind_supp, ind_attn = self.ind_gat(node_embeddings, ind_adj, require_weights)
+        pos_supp, pos_attn = self.pos_gat(node_embeddings, pos_adj, require_weights)
+        neg_supp, neg_attn = self.neg_gat(node_embeddings, neg_adj, require_weights)
+
+        ind_supp = self.ind_mlp(ind_supp)
+        pos_supp = self.pos_mlp(pos_supp)
+        neg_supp = self.neg_mlp(neg_supp)
+
+        if self.no_ind and self.no_neg:
+            stacked = torch.stack([node_embeddings], dim=2)
+        elif self.no_ind:
+            stacked = torch.stack([node_embeddings, neg_supp], dim=2)
+        elif self.no_neg:
+            stacked = torch.stack([node_embeddings, ind_supp], dim=2)
+        else:
+            stacked = torch.stack([node_embeddings, ind_supp, pos_supp, neg_supp], dim=2)
+
+        fused_embedding, sem_attn = self.sem_gat(stacked.permute(0, 2, 1, 3), require_weights)
+        fused_embedding = self.pn(fused_embedding)
+
+        scores = self.output_head(fused_embedding).squeeze(-1)
+
         if require_weights:
             attn_payload = {
-                "industry": ind_attn_weights,
-                "positive": pos_attn_weights,
-                "negative": neg_attn_weights,
-                "semantic": sem_attn_weights,
+                "industry": ind_attn,
+                "positive": pos_attn,
+                "negative": neg_attn,
+                "semantic": sem_attn,
             }
-            return weights, attn_payload
-        return weights
+            return scores, attn_payload
+
+        return scores

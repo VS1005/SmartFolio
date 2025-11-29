@@ -5,6 +5,7 @@ import argparse
 import warnings
 from datetime import datetime
 import calendar
+import numpy as np
 warnings.filterwarnings("ignore", category=UserWarning)
 import pandas as pd
 import torch
@@ -20,6 +21,84 @@ from tools.pathway_temporal import discover_monthly_shards_with_pathway
 from tools.pathway_monthly_builder import build_monthly_shards_with_pathway
 
 PATH_DATA = f'./dataset/'
+
+
+def load_finrag_prior(weights_path, num_stocks, tickers_csv="tickers.csv"):
+    """
+    Load FinRAG weights from a JSON file and normalize them to a simplex vector.
+    Supports payloads shaped as:
+      - [w1, w2, ...]
+      - {"weights": [...]} or {"scores": [...]}
+      - {"TICKER": weight, ...} (ordered by tickers_csv when available)
+    """
+    if not weights_path:
+        print("FinRAG weights path not provided; skipping prior initialization.")
+        return None
+    if not os.path.exists(weights_path):
+        print(f"FinRAG weights path not found: {weights_path}; skipping prior initialization.")
+        return None
+
+    with open(weights_path, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+
+    # Unwrap common container keys
+    if isinstance(payload, dict) and ("weights" in payload or "scores" in payload):
+        payload = payload.get("weights") or payload.get("scores")
+
+    # Resolve to a list of weights
+    weights = None
+    if isinstance(payload, dict):
+        # Map tickers to weights using the CSV order when available
+        if os.path.exists(tickers_csv):
+            tickers = pd.read_csv(tickers_csv)["ticker"].tolist()
+        else:
+            tickers = list(payload.keys())
+        weights = [float(payload.get(ticker, 0.0)) for ticker in tickers]
+    else:
+        weights = list(payload)
+
+    weights_arr = np.asarray(weights, dtype=np.float32)
+    if weights_arr.shape[0] != num_stocks:
+        print(
+            f"FinRAG weights length {weights_arr.shape[0]} does not match num_stocks {num_stocks}; "
+            "skipping prior initialization."
+        )
+        return None
+
+    weights_arr = np.clip(weights_arr, 0.0, None)
+    total = float(weights_arr.sum())
+    if total <= 0:
+        print("FinRAG weights sum to zero; skipping prior initialization.")
+        return None
+
+    prior = weights_arr / total
+    print(f"Loaded FinRAG prior from {weights_path} (len={len(prior)})")
+    return prior
+
+
+def init_policy_bias_from_prior(model, prior_weights):
+    """
+    Initialize the policy action head bias so the mean action roughly matches the prior.
+    Works for SB3 ActorCriticPolicy subclasses where action_net is a Linear layer.
+    """
+    if prior_weights is None:
+        return
+    policy = getattr(model, "policy", None)
+    action_net = getattr(policy, "action_net", None)
+    if action_net is None or not hasattr(action_net, "bias"):
+        print("Policy action_net missing; cannot apply FinRAG prior bias.")
+        return
+    if action_net.bias.shape[0] != len(prior_weights):
+        print(
+            f"Action bias shape {action_net.bias.shape[0]} does not match prior length {len(prior_weights)}; "
+            "skipping prior bias init."
+        )
+        return
+
+    prior_logits = torch.log(torch.from_numpy(prior_weights + 1e-8)).to(action_net.bias.device)
+    with torch.no_grad():
+        action_net.bias.copy_(prior_logits)
+    print("Initialized policy action bias from FinRAG prior.")
 
 
 def _infer_month_dates(shard):
@@ -277,6 +356,8 @@ def train_predict(args, predict_dt):
                         **PPO_PARAMS,
                         seed=args.seed,
                         device=args.device)
+    # Initialize policy bias with FinRAG prior if available
+    init_policy_bias_from_prior(model, getattr(args, "finrag_prior", None))
     train_model_and_predict(model, args, train_loader, val_loader, test_loader)
 
 
@@ -312,6 +393,8 @@ if __name__ == '__main__':
                         help="Minimum number of daily files required to keep a discovered month window")
     parser.add_argument("--expert_cache_path", default=None,
                         help="Optional path to cache expert trajectories for reuse")
+    parser.add_argument("--finrag_weights_path", default=None,
+                        help="Path to FinRAG weights JSON used to initialize the policy prior")
     # Training hyperparameters
     parser.add_argument("--irl_epochs", type=int, default=50, help="Number of IRL training epochs")
     parser.add_argument("--rl_timesteps", type=int, default=10000, help="Number of RL timesteps for training")
@@ -413,6 +496,10 @@ if __name__ == '__main__':
         print(f"Auto-detected num_stocks for custom market: {args.num_stocks}")
     else:
         raise ValueError(f"No pickle files found in {data_dir} to determine num_stocks")
+
+    # Load FinRAG prior (if provided) once we know num_stocks
+    args.finrag_prior = load_finrag_prior(args.finrag_weights_path, args.num_stocks)
+
     print("market:", args.market, "num_stocks:", args.num_stocks)
     if args.run_monthly_fine_tune:
         checkpoint = fine_tune_month(args, manifest_path="dataset_default/data_train_predict_custom/1_corr/monthly_manifest.json")

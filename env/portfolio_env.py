@@ -5,6 +5,7 @@ from gym import spaces
 import numpy as np
 from stable_baselines3.common.vec_env import DummyVecEnv
 
+
 class StockPortfolioEnv(gym.Env):
     def __init__(self, args, corr=None, ts_features=None, features=None,
                  ind=None, pos=None, neg=None, returns=None, pyg_data=None,
@@ -16,19 +17,19 @@ class StockPortfolioEnv(gym.Env):
         self.done = False
         self.reward = 0.0
         self.net_value = 1.0
-        self.peak_value = 1.0  # Track peak wealth for drawdown calculation
+        self.peak_value = 1.0
         self.net_value_s = [1.0]
         self.daily_return_s = [0.0]
         self.num_stocks = returns.shape[-1]
         self.benchmark_return = benchmark_return
-        
+
         # Track portfolio weights history
-        self.weights_history = []  # List of weight vectors at each step
-        self.dates = []  # List of dates/step indices
+        self.weights_history = []
+        self.dates = []
 
         self.corr_tensor = corr
-        self.ts_features_tensor = ts_features
-        self.features_tensor = features
+        self.ts_features_tensor = ts_features  # Expect [steps, num_stocks, lookback, feat_dim]
+        self.features_tensor = features  # Kept for compatibility, unused in temporal setup
         self.ind_tensor = ind
         self.pos_tensor = pos
         self.neg_tensor = neg
@@ -37,100 +38,95 @@ class StockPortfolioEnv(gym.Env):
         self.ind_yn = ind_yn
         self.pos_yn = pos_yn
         self.neg_yn = neg_yn
+        self.mode = mode
+        self.reward_net = reward_net
+        self.device = device
+
         self.risk_profile = risk_profile or {}
         self.risk_score = float(self.risk_profile.get('risk_score', getattr(args, 'risk_score', 0.5)))
         self.max_weight_cap = self.risk_profile.get('max_weight', None)
         self.min_weight_floor = self.risk_profile.get('min_weight', 0.0)
-        # Conservative users (low score) get higher temperature to spread allocations
-        self.action_temperature = 0.2 + 2.3 * (1.0 - self.risk_score)
 
-        # Action space: continuous weights for each stock
-        # Output raw scores, will be normalized via softmax to sum to 1
-        # SB3 requires finite bounds, use large range [-10, 10] which is sufficient for softmax
+        # Monthly rebalancing (approx. 21 trading days)
+        self.rebalance_window = 21
+
+        # Temperature controls allocation concentration
+        self.action_temperature = 0.5 + 2.0 * (1.0 - self.risk_score)
+
+        # Action space: continuous scores per stock (softmaxed to weights)
         self.action_space = spaces.Box(
-            low=-10.0,  # Scores before softmax
-            high=10.0,  # After softmax, will become valid probabilities in [0, 1]
+            low=-10.0,
+            high=10.0,
             shape=(self.num_stocks,),
-            dtype=np.float32
+            dtype=np.float32,
         )
 
-        # Optional: store for compatibility if needed
-        self.top_k = max(1, int(0.1 * self.num_stocks))  # Can be used for constraints later
+        self.top_k = max(1, int(0.1 * self.num_stocks))
 
-        # Partially observable setting
-        # Observation space: stock features plus relation graphs
-        # HGAT expects flattened input: [ind_matrix, pos_matrix, neg_matrix, features]
-        obs_len = 0
-        if self.ind_yn:
-            obs_len += self.num_stocks * self.num_stocks  # Flattened industry matrix
+        # Observation space: [ind_matrix, pos_matrix, neg_matrix, ts_features_flat]
+        adj_size = self.num_stocks * self.num_stocks
+        obs_len = adj_size * 3  # always reserve three slots
+
+        if self.ts_features_tensor is not None and len(self.ts_features_tensor.shape) == 4:
+            self.lookback = self.ts_features_tensor.shape[2]
+            self.feat_dim = self.ts_features_tensor.shape[3]
         else:
-            obs_len += self.num_stocks * self.num_stocks  # Zeros placeholder
-        if self.pos_yn:
-            obs_len += self.num_stocks * self.num_stocks  # Flattened momentum matrix
-        else:
-            obs_len += self.num_stocks * self.num_stocks  # Zeros placeholder
-        if self.neg_yn:
-            obs_len += self.num_stocks * self.num_stocks  # Flattened reversal matrix
-        else:
-            obs_len += self.num_stocks * self.num_stocks  # Zeros placeholder
-        obs_len += self.num_stocks * args.input_dim  # Flattened features
-        
-        self.observation_space = spaces.Box(low=-np.inf,
-                                            high=np.inf,
-                                            shape=(obs_len,),  # 1D flattened observation
-                                            dtype=np.float32)
-        self.mode = mode
-        self.reward_net = reward_net  # Inject IRL reward network
-        self.device = device
+            self.lookback = getattr(args, "lookback", 30)
+            self.feat_dim = getattr(args, "input_dim", 6)
+
+        ts_flat_size = self.num_stocks * self.lookback * self.feat_dim
+        obs_len += ts_flat_size
+
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(obs_len,),
+            dtype=np.float32,
+        )
 
     def load_observation(self, ts_yn=False, ind_yn=False, pos_yn=False, neg_yn=False):
-        # Stable-Baselines3's DummyVecEnv expects NumPy observations
-        if torch.isnan(self.features_tensor).any():
-            print("Detected NaNs in feature tensor!")
-        features = self.features_tensor[self.current_step].cpu().numpy()  # [num_stocks, 6]
-        corr_matrix = self.corr_tensor[self.current_step].cpu().numpy()
-        ind_matrix = self.ind_tensor[self.current_step].cpu().numpy()  # [num_stocks, num_stocks]
-        pos_matrix = self.pos_tensor[self.current_step].cpu().numpy()  # [num_stocks, num_stocks]
-        neg_matrix = self.neg_tensor[self.current_step].cpu().numpy()  # [num_stocks, num_stocks]
-        
-        # HGAT expects: [ind_matrix, pos_matrix, neg_matrix, features] all flattened and concatenated
-        # Reshape matrices to [num_stocks, num_stocks] and features to [num_stocks, 6]
-        # Then flatten in the correct order for HGAT
-        obs_parts = []
-        if ind_yn:
-            obs_parts.append(ind_matrix.flatten())  # [num_stocks * num_stocks]
+        # Adjacency matrices
+        if torch.is_tensor(self.ind_tensor):
+            ind_matrix = self.ind_tensor[self.current_step].cpu().numpy()
+            pos_matrix = self.pos_tensor[self.current_step].cpu().numpy()
+            neg_matrix = self.neg_tensor[self.current_step].cpu().numpy()
         else:
-            obs_parts.append(np.zeros(self.num_stocks * self.num_stocks))
-            
-        if pos_yn:
-            obs_parts.append(pos_matrix.flatten())  # [num_stocks * num_stocks]
-        else:
-            obs_parts.append(np.zeros(self.num_stocks * self.num_stocks))
-            
-        if neg_yn:
-            obs_parts.append(neg_matrix.flatten())  # [num_stocks * num_stocks]
-        else:
-            obs_parts.append(np.zeros(self.num_stocks * self.num_stocks))
-        
-        obs_parts.append(features.flatten())  # [num_stocks * 6]
-        
-        # Concatenate all parts into single vector
-        obs = np.concatenate(obs_parts)  # Total: 3*num_stocks^2 + num_stocks*6
-        
-        self.observation = obs
-        self.ror = self.ror_batch[self.current_step].cpu()
+            ind_matrix = self.ind_tensor[self.current_step]
+            pos_matrix = self.pos_tensor[self.current_step]
+            neg_matrix = self.neg_tensor[self.current_step]
 
+        # Time-series features: expect [num_stocks, lookback, feat_dim]
+        if torch.is_tensor(self.ts_features_tensor):
+            ts_data = self.ts_features_tensor[self.current_step].cpu().numpy()
+        else:
+            ts_data = self.ts_features_tensor[self.current_step]
+
+        if ts_data.shape != (self.num_stocks, self.lookback, self.feat_dim):
+            raise ValueError(
+                f"ts_features shape {ts_data.shape} does not match expected "
+                f"({self.num_stocks}, {self.lookback}, {self.feat_dim})"
+            )
+
+        obs_parts = []
+        zeros_mat = np.zeros(self.num_stocks * self.num_stocks, dtype=np.float32)
+        obs_parts.append(ind_matrix.flatten() if ind_yn else zeros_mat)
+        obs_parts.append(pos_matrix.flatten() if pos_yn else zeros_mat)
+        obs_parts.append(neg_matrix.flatten() if neg_yn else zeros_mat)
+        obs_parts.append(ts_data.flatten())
+
+        self.observation = np.concatenate(obs_parts).astype(np.float32)
+        self.ror = self.ror_batch[self.current_step].cpu()
 
     def reset(self):
         self.current_step = 0
         self.done = False
         self.reward = 0.0
         self.net_value = 1.0
-        self.peak_value = 1.0  # Reset peak value
+        self.peak_value = 1.0
         self.net_value_s = [1.0]
         self.daily_return_s = [0.0]
-        self.weights_history = []  # Reset weights history
-        self.dates = []  # Reset dates
+        self.weights_history = []
+        self.dates = []
         self.load_observation(ind_yn=self.ind_yn, pos_yn=self.pos_yn, neg_yn=self.neg_yn)
         return self.observation
 
@@ -142,83 +138,83 @@ class StockPortfolioEnv(gym.Env):
         if self.done:
             if self.mode == "test":
                 print("=================================")
-                print(f"net_values:{self.net_value_s}")
+                print(f"Final Net Value: {self.net_value:.4f}")
                 metrics, benchmark_metrics = self.evaluate()
-
-                print("ARR: ", metrics.get("arr"))
-                print("AVOL: ", metrics.get("avol"))
-                print("Sharpe: ", metrics.get("sharpe"))
-                print("MDD: ", metrics.get("mdd"))
-                print("CR: ", metrics.get("cr"))
-                print("IR: ", metrics.get("ir"))
+                print(f"ARR: {metrics.get('arr'):.4f} | AVOL: {metrics.get('avol'):.4f} | Sharpe: {metrics.get('sharpe'):.4f}")
+                print(f"MDD: {metrics.get('mdd'):.4f} | CR: {metrics.get('cr'):.4f} | IR: {metrics.get('ir'):.4f}")
                 if benchmark_metrics:
-                    print("Benchmark ARR: ", benchmark_metrics.get("arr"))
-                    print("Benchmark AVOL: ", benchmark_metrics.get("avol"))
-                    print("Benchmark Sharpe: ", benchmark_metrics.get("sharpe"))
-                    print("Benchmark MDD: ", benchmark_metrics.get("mdd"))
-                    print("Benchmark CR: ", benchmark_metrics.get("cr"))
+                    print(
+                        f"Benchmark ARR: {benchmark_metrics.get('arr'):.4f} | "
+                        f"AVOL: {benchmark_metrics.get('avol'):.4f} | "
+                        f"Sharpe: {benchmark_metrics.get('sharpe'):.4f} | "
+                        f"MDD: {benchmark_metrics.get('mdd'):.4f} | "
+                        f"CR: {benchmark_metrics.get('cr'):.4f}"
+                    )
                 print("=================================")
         else:
-            # load s'
             self.current_step += 1
             self.load_observation(ind_yn=self.ind_yn, pos_yn=self.pos_yn, neg_yn=self.neg_yn)
-            
-            # Continuous action space: normalize to portfolio weights
-            # actions: [num_stocks] raw scores from policy
-            # Apply softmax to ensure weights sum to 1 and are non-negative
-            action_scores = np.array(actions).flatten()
-            
-            # Softmax normalization: w_i = exp(a_i) / sum(exp(a_j))
-            exp_actions = np.exp((action_scores - np.max(action_scores)) / self.action_temperature)  # Temperature controls concentration
-            weights = exp_actions / exp_actions.sum()
-            weights = self._apply_risk_constraints(weights)
-            
-            # Store weights for this step
+
+            prev_weights = self.weights_history[-1] if self.weights_history else np.zeros(self.num_stocks, dtype=np.float32)
+            is_rebalancing_day = (self.current_step % self.rebalance_window == 0) or (self.current_step == 1)
+
+            if is_rebalancing_day:
+                action_scores = np.array(actions).flatten()
+                temp = max(self.action_temperature, 1e-4)
+                exp_actions = np.exp((action_scores - np.max(action_scores)) / temp)
+                weights = exp_actions / exp_actions.sum()
+                weights = self._apply_risk_constraints(weights)
+
+                turnover = np.sum(np.abs(weights - prev_weights))
+                transaction_cost_factor = 0.001
+                turnover_penalty = transaction_cost_factor * turnover
+            else:
+                stock_returns = np.array(self.ror)
+                new_values = prev_weights * (1 + stock_returns)
+                portfolio_value_change = np.sum(new_values)
+                if portfolio_value_change > 0:
+                    weights = new_values / portfolio_value_change
+                else:
+                    weights = prev_weights
+                turnover_penalty = 0.0
+
             self.weights_history.append(weights.copy())
             self.dates.append(self.current_step)
-            
-            # Optional: Apply concentration penalty or top-K constraint
-            # For now, allow full continuous allocation
-            
-            if self.mode == "test":
-                print(f"Step {self.current_step}")
-                print(f"Weights (top 5): {sorted(zip(range(len(weights)), weights), key=lambda x: x[1], reverse=True)[:5]}")
-                print(f"Weight sum: {weights.sum():.6f}")
-                print(f"Non-zero allocations: {(weights > 0.01).sum()}/{len(weights)}")
 
-            # Use the IRL reward network when available
+            if self.mode == "test" and self.current_step % self.rebalance_window == 0:
+                print(f"Step {self.current_step} [Rebalance={is_rebalancing_day}]")
+                if is_rebalancing_day:
+                    print(f"  Turnover: {turnover:.4f} | Cost: {turnover_penalty:.6f}")
+
+            # Reward
             if self.reward_net is not None:
-                # self.observation is already flattened [obs_len]
-                state_tensor = torch.FloatTensor(self.observation).to(self.device)  # Current state
-                # Pass actual weights (continuous) instead of multi-hot
-                action_tensor = torch.FloatTensor(weights).to(self.device)  # Action (weight vector)
-                
-                # Pass wealth information for drawdown calculation
+                state_tensor = torch.FloatTensor(self.observation).to(self.device)
+                action_tensor = torch.FloatTensor(weights).to(self.device)
                 wealth_info = torch.FloatTensor([self.net_value, self.peak_value]).to(self.device)
-                
                 with torch.no_grad():
-                    self.reward = self.reward_net(
+                    raw_reward = self.reward_net(
                         state_tensor,
                         action_tensor,
                         wealth_info,
                         risk_score=self.risk_score
                     ).mean().cpu().item()
             else:
-                # Portfolio return: weighted sum of individual stock returns
-                self.reward = np.dot(weights, np.array(self.ror))
+                raw_reward = np.dot(weights, np.array(self.ror))
 
-            self.net_value *= (1 + self.reward)
-            self.peak_value = max(self.peak_value, self.net_value)  # Update peak value
+            self.reward = raw_reward - turnover_penalty
+
+            # Wealth tracking
+            step_return = np.dot(weights, np.array(self.ror))
+            self.net_value *= (1 + step_return)
+            self.peak_value = max(self.peak_value, self.net_value)
             self.daily_return_s.append(self.reward)
             self.net_value_s.append(self.net_value)
 
         return self.observation, self.reward, self.done, {}
 
     def _apply_risk_constraints(self, weights):
-        """Apply simple weight caps/floors derived from the risk profile."""
         if self.max_weight_cap is not None and self.max_weight_cap > 0:
             clipped = np.minimum(weights, self.max_weight_cap)
-            # Optional floor to avoid zeroing everything for aggressive users
             if self.min_weight_floor > 0:
                 clipped = np.maximum(clipped, self.min_weight_floor)
             total = clipped.sum()
@@ -241,97 +237,60 @@ class StockPortfolioEnv(gym.Env):
         df_daily_return = pd.DataFrame(self.daily_return_s)
         df_daily_return.columns = ["daily_return"]
         return df_daily_return
-    
+
     def get_weights_history(self):
-        """Return portfolio weights history as numpy array.
-        
-        Returns:
-            np.ndarray: Shape [num_steps, num_stocks] containing portfolio weights
-        """
         if not self.weights_history:
             return np.array([])
         return np.array(self.weights_history)
-    
+
     def get_weights_dataframe(self, tickers=None):
-        """Return portfolio weights as a DataFrame.
-        
-        Args:
-            tickers: Optional list of ticker symbols. If None, uses stock indices.
-            
-        Returns:
-            pd.DataFrame: Columns are tickers/indices, rows are time steps
-        """
         weights_array = self.get_weights_history()
         if weights_array.size == 0:
             return pd.DataFrame()
-        
-        if tickers is not None:
-            if len(tickers) != weights_array.shape[1]:
-                raise ValueError(f"Number of tickers ({len(tickers)}) doesn't match "
-                               f"number of stocks ({weights_array.shape[1]})")
+        if tickers is not None and len(tickers) == weights_array.shape[1]:
             columns = tickers
         else:
             columns = [f"stock_{i}" for i in range(weights_array.shape[1])]
-        
         df = pd.DataFrame(weights_array, columns=columns)
-        df.insert(0, 'step', self.dates)
+        df.insert(0, "step", self.dates)
         return df
-
-    def _compute_metrics(self, series: pd.Series) -> dict:
-        metrics = {"arr": 0.0, "avol": 0.0, "sharpe": 0.0, "mdd": 0.0, "cr": 0.0}
-        if series is None or len(series) == 0:
-            return metrics
-
-        metrics["arr"] = (1 + series.mean()) ** 252 - 1
-        metrics["avol"] = series.std() * (252 ** 0.5)
-        metrics["sharpe"] = (252 ** 0.5) * series.mean() / series.std() if series.std() != 0 else 0.0
-
-        cumulative = (1 + series).cumprod()
-        running_max = cumulative.cummax()
-        drawdown = cumulative / running_max - 1
-        metrics["mdd"] = drawdown.min() if not drawdown.empty else 0.0
-        metrics["cr"] = metrics["arr"] / abs(metrics["mdd"]) if metrics["mdd"] != 0 else 0.0
-        return metrics
 
     def evaluate(self):
         df_daily_return = self.get_df_daily_return()
-        portfolio_returns = df_daily_return["daily_return"].reset_index(drop=True)
-
-        # Drop the initial zero placeholder to align with benchmark length when present
-        if len(portfolio_returns) > 0 and portfolio_returns.iloc[0] == 0:
-            portfolio_returns = portfolio_returns.iloc[1:].reset_index(drop=True)
-
-        benchmark_series = None
-        if self.benchmark_return is not None:
-            if isinstance(self.benchmark_return, pd.DataFrame):
-                if "daily_return" in self.benchmark_return.columns:
-                    benchmark_series = self.benchmark_return["daily_return"]
-                elif "return" in self.benchmark_return.columns:
-                    benchmark_series = self.benchmark_return["return"]
-            elif isinstance(self.benchmark_return, pd.Series):
-                benchmark_series = self.benchmark_return
-            else:
-                benchmark_series = pd.Series(self.benchmark_return)
-
-            if benchmark_series is not None:
-                benchmark_series = pd.Series(benchmark_series).dropna().reset_index(drop=True)
-
-        portfolio_metrics = self._compute_metrics(portfolio_returns)
+        metrics = dict(arr=0, avol=0, sharpe=0, mdd=0, cr=0, ir=0)
         benchmark_metrics = {}
 
-        if benchmark_series is not None and not benchmark_series.empty and not portfolio_returns.empty:
-            aligned_len = min(len(portfolio_returns), len(benchmark_series))
-            portfolio_aligned = portfolio_returns.iloc[:aligned_len]
-            benchmark_aligned = benchmark_series.iloc[:aligned_len]
+        if df_daily_return["daily_return"].std() != 0:
+            arr = (1 + df_daily_return["daily_return"].mean()) ** 252 - 1
+            avol = df_daily_return["daily_return"].std() * (252 ** 0.5)
+            sharpe = (252 ** 0.5) * df_daily_return["daily_return"].mean() / df_daily_return["daily_return"].std()
+            df_daily_return["cumulative_return"] = (1 + df_daily_return["daily_return"]).cumprod()
+            running_max = df_daily_return["cumulative_return"].cummax()
+            drawdown = df_daily_return["cumulative_return"] / running_max - 1
+            mdd = drawdown.min()
+            cr = arr / abs(mdd) if mdd != 0 else 0
 
-            benchmark_metrics = self._compute_metrics(benchmark_aligned)
+            metrics.update(arr=arr, avol=avol, sharpe=sharpe, mdd=mdd, cr=cr)
 
-            excess_return = portfolio_aligned - benchmark_aligned
-            if excess_return.std() != 0:
-                portfolio_metrics["ir"] = excess_return.mean() / excess_return.std() * (252 ** 0.5)
-            else:
-                portfolio_metrics["ir"] = 0.0
-        else:
-            portfolio_metrics["ir"] = 0.0
+            if self.benchmark_return is not None and len(self.benchmark_return) == len(df_daily_return):
+                ex_return = df_daily_return["daily_return"] - self.benchmark_return.reset_index(drop=True)
+                if ex_return.std() != 0:
+                    ir = ex_return.mean() / ex_return.std() * (252 ** 0.5)
+                    benchmark_arr = (1 + self.benchmark_return.mean()) ** 252 - 1
+                    benchmark_avol = self.benchmark_return.std() * (252 ** 0.5)
+                    benchmark_sharpe = (
+                        (252 ** 0.5) * self.benchmark_return.mean() / self.benchmark_return.std()
+                        if self.benchmark_return.std() != 0 else 0
+                    )
+                    benchmark_mdd = 0
+                    benchmark_cr = 0
+                    benchmark_metrics = dict(
+                        arr=benchmark_arr,
+                        avol=benchmark_avol,
+                        sharpe=benchmark_sharpe,
+                        mdd=benchmark_mdd,
+                        cr=benchmark_cr,
+                    )
+                    metrics["ir"] = ir
 
-        return portfolio_metrics, benchmark_metrics
+        return metrics, benchmark_metrics

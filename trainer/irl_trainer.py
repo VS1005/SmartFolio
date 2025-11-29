@@ -8,7 +8,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.evaluation import evaluate_policy
 from torch_geometric.data import DataLoader
 
-from env.portfolio_env import *
+from env.portfolio_env import StockPortfolioEnv
 from trainer.evaluation_utils import (
     aggregate_metric_records,
     apply_promotion_gate,
@@ -17,7 +17,6 @@ from trainer.evaluation_utils import (
 )
 from utils.ticker_mapping import (
     get_ticker_mapping_for_period,
-    load_ticker_mapping,
 )
 from gen_data.gen_expert_ensemble import (
     generate_expert_trajectories,
@@ -32,18 +31,18 @@ class RewardNetwork(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(in_features=input_dim, out_features=hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, state, action, wealth_info=None):
-        # wealth_info is ignored in this simple network (for compatibility)
+    def forward(self, state, action, wealth_info=None, risk_score=None):
+        if state.dim() > 2:
+            state = state.view(state.size(0), -1)
         state = state.squeeze()
         action = action.unsqueeze(1)
         x = torch.cat([state, action], dim=1)
         return self.fc(x)
 
 
-# Maximum entropy IRL trainer
 class MaxEntIRL:
     def __init__(self, reward_net, expert_data, lr=1e-3, risk_score: float = 0.5):
         self.reward_net = reward_net
@@ -53,31 +52,19 @@ class MaxEntIRL:
 
     def train(self, agent_env, model, num_epochs=50, batch_size=32, device='cuda:0'):
         for epoch in range(num_epochs):
-            # Generate agent trajectories
             agent_trajectories = self._sample_trajectories(agent_env, model, batch_size=batch_size, device=device)
-
-            # Compute the reward gap between expert and agent rollouts
             expert_rewards = self._calculate_rewards(self.expert_data, device)
             agent_rewards = self._calculate_rewards(agent_trajectories, device)
 
-            # Maximum entropy IRL loss
-            # Original: loss = -(expert_rewards.mean() - torch.logsumexp(agent_rewards, dim=0))
-            # Reformulated to always show meaningful values:
             expert_mean = expert_rewards.mean()
             agent_logsumexp = torch.logsumexp(agent_rewards, dim=0)
-            
-            # The actual loss (can be negative, which is OK)
             loss = -(expert_mean - agent_logsumexp)
-            
-            # For logging: show the gap (always interpretable)
             reward_gap = expert_mean - agent_logsumexp
 
-            # Backpropagation
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
-            
-            # Better logging: show both loss and interpretable metrics
+
             print(f"Train IRL Epoch {epoch + 1}/{num_epochs}, Loss: {loss.item():.4f}, "
                   f"Expert: {expert_mean.item():.4f}, Agent: {agent_logsumexp.item():.4f}, "
                   f"Gap: {reward_gap.item():.4f}")
@@ -85,19 +72,13 @@ class MaxEntIRL:
     def _sample_trajectories(self, env, model, batch_size, device):
         trajectories = []
         obs = env.reset()
-        # obs is now 1D flattened: [num_envs, obs_len]
-        # For DummyVecEnv, obs shape is [1, obs_len]
-        
-        # Determine num_stocks from action space (now Box, not MultiDiscrete)
-        num_stocks = env.action_space.shape[0]  # Box space has shape attribute
-        
+        num_stocks = env.action_space.shape[0]
+
         for _ in range(batch_size):
             action, _ = model.predict(obs)
             next_obs, reward, done, _ = env.step(action)
 
-            # action is now continuous weights [num_envs, num_stocks]
-            # Normalize to ensure sum to 1 (apply softmax)
-            action_scores = action[0]  # Get first env's action
+            action_scores = action[0]
             exp_actions = np.exp(action_scores - np.max(action_scores))
             action_weights = exp_actions / exp_actions.sum()
 
@@ -110,20 +91,13 @@ class MaxEntIRL:
     def _calculate_rewards(self, trajectories, device):
         rewards = []
         for state, action in trajectories:
-            # Handle different state shapes
-            if isinstance(state, np.ndarray):
-                # If state has shape [1, obs_len], squeeze to [obs_len]
-                if state.ndim > 1 and state.shape[0] == 1:
-                    state = state.squeeze(0)
-                # If state already has correct shape, keep as is
+            if isinstance(state, np.ndarray) and state.ndim > 1 and state.shape[0] == 1:
+                state = state.squeeze(0)
             state_tensor = torch.FloatTensor(state).to(device)
             action_tensor = torch.FloatTensor(action).to(device)
-            
-            # For expert trajectories, we don't have wealth info, so pass None
-            # The reward network will handle this appropriately
             reward = self.reward_net(
-                state_tensor,
-                action_tensor,
+                state_tensor.unsqueeze(0),
+                action_tensor.unsqueeze(0),
                 wealth_info=None,
                 risk_score=self.risk_score,
             )
@@ -135,128 +109,117 @@ class MultiRewardNetwork(nn.Module):
     def __init__(self, input_dim, num_stocks, hidden_dim=64,
                  ind_yn=False, pos_yn=False, neg_yn=False,
                  use_drawdown=True, dd_kappa=0.05, dd_tau=0.01,
-                 dd_base_weight=1.0, dd_risk_factor=1.0):
+                 dd_base_weight=1.0, dd_risk_factor=1.0,
+                 lookback=30):
         super().__init__()
         self.num_stocks = num_stocks
         self.input_dim = input_dim
         self.use_drawdown = use_drawdown
-        self.dd_kappa = dd_kappa  # Ignore drawdowns below this threshold
-        self.dd_tau = dd_tau  # Smoothness parameter for SoftPlus
-        self.dd_base_weight = dd_base_weight  # β_base for drawdown
-        self.dd_risk_factor = dd_risk_factor  # k in β_dd(ρ) = β_base * (1 + k*(1-ρ))
-        
-        # Risk-adaptive kappa (optional, can be enabled later)
-        self.dd_kappa_max = 0.10  # Conservative users tolerate less drawdown
-        self.dd_kappa_min = 0.02  # Aggressive users tolerate more drawdown
-        
-        # Calculate dimensions for flattened format
-        # Observation: [ind_matrix, pos_matrix, neg_matrix, features]
-        # Each matrix is num_stocks x num_stocks, features is num_stocks x input_dim
+        self.dd_base_weight = dd_base_weight
+        self.dd_risk_factor = dd_risk_factor
+        self.dd_tau = dd_tau
+        self.dd_kappa_min = 0.02
+        self.dd_kappa_max = 0.10
+
+        adj_size = num_stocks * num_stocks
         self.feature_dims = {
-            'ind': num_stocks * num_stocks if ind_yn else 0,
-            'pos': num_stocks * num_stocks if pos_yn else 0,
-            'neg': num_stocks * num_stocks if neg_yn else 0,
-            'base': num_stocks * input_dim  # Flattened features
+            'ind': adj_size if ind_yn else 0,
+            'pos': adj_size if pos_yn else 0,
+            'neg': adj_size if neg_yn else 0,
+            'base': num_stocks * lookback * input_dim
         }
 
-        # Build encoders dynamically based on enabled relations
         self.encoders = nn.ModuleDict()
         for feat, dim in self.feature_dims.items():
             if dim > 0:
-                # For flattened input, we process the entire flattened vector + action
                 self.encoders[feat] = nn.Sequential(
-                    nn.Linear(dim + num_stocks, hidden_dim),  # +num_stocks for action (multi-hot)
+                    nn.Linear(dim + num_stocks, hidden_dim),
                     nn.ReLU()
                 )
 
-        # Drawdown penalty encoder
         if self.use_drawdown:
             self.dd_encoder = nn.Sequential(
-                nn.Linear(2, hidden_dim),  # Input: [W_current, W_peak]
+                nn.Linear(2, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, 1)
             )
 
-        # Reward weight parameters (one per enabled feature block, plus drawdown)
         active_feats = [k for k, v in self.feature_dims.items() if v > 0]
         self.num_rewards = len(active_feats)
         if self.use_drawdown:
-            self.num_rewards += 1  # Add drawdown component
+            self.num_rewards += 1
         self.weights = nn.Parameter(torch.ones(self.num_rewards))
 
     def forward(self, state, action, wealth_info=None, risk_score=None):
-        # state is flattened: [batch, obs_len] where obs_len = 3*num_stocks^2 + num_stocks*input_dim
-        # action is multi-hot: [batch, num_stocks]
-        # wealth_info: [batch, 2] containing [W_current, W_peak]
-        # risk_score: [batch, 1] or scalar, ρ ∈ [0, 1] where 0=conservative, 1=aggressive
-        
-        # Handle single sample case
+        batch_size = state.shape[0] if state.dim() > 1 else 1
         if state.dim() == 1:
             state = state.unsqueeze(0)
         if action.dim() == 1:
             action = action.unsqueeze(0)
         if wealth_info is not None and wealth_info.dim() == 1:
             wealth_info = wealth_info.unsqueeze(0)
-        
-        batch_size = state.shape[0]
-        
-        # Default risk score if not provided (moderate = 0.5)
+
         if risk_score is None:
             risk_score = torch.ones(batch_size, 1, device=state.device) * 0.5
         elif isinstance(risk_score, (int, float)):
             risk_score = torch.ones(batch_size, 1, device=state.device) * risk_score
         elif risk_score.dim() == 0:
-            risk_score = risk_score.unsqueeze(0).unsqueeze(0).expand(batch_size, 1)
+            risk_score = risk_score.view(1, 1).expand(batch_size, 1)
         elif risk_score.dim() == 1:
             risk_score = risk_score.unsqueeze(1)
-        
-        # Split flattened features back into logical blocks
+
+        # Dynamically infer base feature length from state to avoid shape mismatches
+        adj_size = self.num_stocks * self.num_stocks
+        expected_adj_total = 3 * adj_size
+        total_len = state.shape[-1]
+        if total_len < expected_adj_total:
+            raise ValueError(f"State length {total_len} is smaller than expected adjacencies {expected_adj_total}")
+        base_dim_actual = total_len - expected_adj_total
+
+        feature_dims_runtime = {
+            'ind': self.feature_dims['ind'],
+            'pos': self.feature_dims['pos'],
+            'neg': self.feature_dims['neg'],
+            'base': base_dim_actual,
+        }
+
         ptr = 0
         features = {}
-        for feat, dim in self.feature_dims.items():
+        for feat, dim in feature_dims_runtime.items():
             if dim > 0:
-                features[feat] = state[..., ptr:ptr + dim]  # [B, dim]
+                features[feat] = state[..., ptr:ptr + dim]
                 ptr += dim
 
-        # Feature-action fusion (IRL component)
         irl_rewards = []
-        for i, (feat, data) in enumerate(features.items()):
-            # data: [B, dim], action: [B, num_stocks]
-            fused = torch.cat([data, action], dim=-1)  # [B, dim + num_stocks]
-            encoded = self.encoders[feat](fused)  # [B, hidden_dim]
-            irl_rewards.append(encoded.mean(dim=-1, keepdim=True))  # [B, 1]
+        active_weights = []
+        for feat, data in features.items():
+            # Rebuild encoder on-the-fly if runtime dim differs from configured dim
+            encoder = self.encoders[feat] if feat in self.encoders else None
+            if encoder is not None and encoder[0].in_features != data.shape[-1] + self.num_stocks:
+                self.encoders[feat] = nn.Sequential(
+                    nn.Linear(data.shape[-1] + self.num_stocks, encoder[0].out_features),
+                    nn.ReLU()
+                ).to(data.device)
+                encoder = self.encoders[feat]
+            fused = torch.cat([data, action], dim=-1)
+            encoded = encoder(fused) if encoder is not None else fused.mean(dim=-1, keepdim=True)
+            irl_rewards.append(encoded.mean(dim=-1, keepdim=True))
+            active_weights.append(self.weights[len(active_weights)])
 
-        # Combine IRL rewards
-        R_irl = sum(w * r for w, r in zip(F.softmax(self.weights[:-1] if self.use_drawdown else self.weights, dim=0), irl_rewards))
-
-        # Drawdown penalty component (risk-adaptive)
         if self.use_drawdown and wealth_info is not None:
-            # wealth_info: [B, 2] = [W_current, W_peak]
-            W_current = wealth_info[:, 0:1]  # [B, 1]
-            W_peak = wealth_info[:, 1:2]  # [B, 1]
-            
-            # Calculate drawdown: dd = (W_peak - W_current) / max(W_peak, epsilon)
+            W_current = wealth_info[:, 0:1]
+            W_peak = wealth_info[:, 1:2]
             epsilon = 1e-8
-            dd = (W_peak - W_current) / torch.clamp(W_peak, min=epsilon)  # [B, 1]
-            
-            # Risk-adaptive kappa (optional): κ(ρ) = κ_max - (κ_max - κ_min) * ρ
-            # Conservative (ρ=0) → high κ (ignore small drawdowns)
-            # Aggressive (ρ=1) → low κ (penalize even small drawdowns)
+            dd = (W_peak - W_current) / torch.clamp(W_peak, min=epsilon)
             kappa_adaptive = self.dd_kappa_min + (self.dd_kappa_max - self.dd_kappa_min) * risk_score
-            
-            # Smooth penalty: -SoftPlus((dd - kappa) / tau)
             dd_scaled = (dd - kappa_adaptive) / self.dd_tau
-            R_dd = -F.softplus(dd_scaled)  # [B, 1]
-            
-            # Risk-adaptive weight: β_dd(ρ) = β_base * (1 + k * (1 - ρ))
-            # Conservative (ρ=0) → β_dd = β_base * (1 + k) = 2x penalty
-            # Aggressive (ρ=1) → β_dd = β_base * 1 = baseline penalty
-            beta_dd = self.dd_base_weight * (1 + self.dd_risk_factor * (1 - risk_score))
-            
-            # Total reward: R_total = R_irl + β_dd(ρ) * R_dd
-            return R_irl + beta_dd * R_dd
-        
-        return R_irl
+            R_dd = -F.softplus(dd_scaled)
+            active_weights.append(self.weights[len(active_weights)])
+            irl_rewards.append(R_dd)
+
+        weights_softmax = F.softmax(torch.stack(active_weights), dim=0)
+        R_total = sum(w * r for w, r in zip(weights_softmax, irl_rewards))
+        return R_total
 
 
 def process_data(data_dict, device="cuda:0"):
@@ -298,7 +261,6 @@ def resolve_expert_cache_path(args, risk_score):
     return cache_setting
 
 
-# Create a placeholder environment that can later be swapped via model.set_env()
 def create_env_init(args, dataset=None, data_loader=None):
     if data_loader is None:
         data_loader = DataLoader(dataset, batch_size=len(dataset), pin_memory=True, collate_fn=lambda x: x,
@@ -317,53 +279,25 @@ def create_env_init(args, dataset=None, data_loader=None):
 
 
 PPO_PARAMS = {
-        "n_steps": 256,  # Reduced from 1024 to prevent OOM with large obs space
-        "ent_coef": 0.005,
-        "learning_rate": 1e-4,
-        "batch_size": 64,  # Reduced from 128 to match n_steps/2
-        "gamma": 0.99,
-        "tensorboard_log": "./logs",
-    }
+    "n_steps": 2048,
+    "ent_coef": 0.005,
+    "learning_rate": 3e-4,
+    "batch_size": 64,
+    "gamma": 0.99,
+    "tensorboard_log": "./logs",
+    "clip_range": 0.2,
+    "gae_lambda": 0.95,
+    "vf_coef": 0.5,
+    "max_grad_norm": 0.5,
+}
 
 
 def model_predict(args, model, test_loader, split: str = "test"):
-    """Evaluate a model on the provided loader and persist metrics."""
+    df_benchmark = pd.read_csv(f"./dataset/index_data/{args.market}_index.csv")
+    df_benchmark = df_benchmark[(df_benchmark['datetime'] >= args.test_start_date) &
+                                (df_benchmark['datetime'] <= args.test_end_date)]
+    benchmark_return = df_benchmark['daily_return']
 
-    index_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dataset", "index_data"))
-    benchmark_paths = [
-        os.path.join(index_dir, "nifty50_index.csv"),
-        os.path.join(index_dir, f"{args.market}_index.csv"),
-    ]
-
-    df_benchmark = None
-    benchmark_source = None
-    for path in benchmark_paths:
-        if os.path.exists(path):
-            try:
-                df_candidate = pd.read_csv(path)
-                df_benchmark = df_candidate
-                benchmark_source = path
-                break
-            except Exception as exc:
-                print(f"Warning: failed to load benchmark file {path}: {exc}")
-
-    benchmark_return = None
-    if df_benchmark is not None:
-        date_col = "datetime" if "datetime" in df_benchmark.columns else ("date" if "date" in df_benchmark.columns else None)
-        ret_col = "daily_return" if "daily_return" in df_benchmark.columns else ("return" if "return" in df_benchmark.columns else None)
-
-        if date_col and ret_col:
-            df_benchmark = df_benchmark.rename(columns={date_col: "datetime", ret_col: "daily_return"})
-            df_benchmark = df_benchmark[(df_benchmark['datetime'] >= args.test_start_date) &
-                                        (df_benchmark['datetime'] <= args.test_end_date)]
-            benchmark_return = df_benchmark['daily_return'].reset_index(drop=True)
-            print(f"Loaded benchmark series from {benchmark_source} with {len(benchmark_return)} rows")
-        else:
-            print("Warning: benchmark file missing expected date/return columns; skipping benchmark comparison.")
-    else:
-        print("Warning: no benchmark index file found; skipping benchmark comparison.")
-    
-    # Load ticker mappings for the test period
     ticker_map = get_ticker_mapping_for_period(
         args.market,
         args.test_start_date,
@@ -373,7 +307,7 @@ def model_predict(args, model, test_loader, split: str = "test"):
 
     records = []
     env_snapshots = []
-    all_weights_data = []  # Collect all weights for CSV export
+    all_weights_data = []
 
     for batch_idx, data in enumerate(test_loader):
         corr, ts_features, features, ind, pos, neg, labels, pyg_data, mask = process_data(data, device=args.device)
@@ -418,10 +352,8 @@ def model_predict(args, model, test_loader, split: str = "test"):
         record = create_metric_record(args, split, metrics_record, batch_idx)
         records.append(record)
         env_snapshots.append((env_test, record["run_id"]))
-        
-        # Collect weights data from the environment
+
         weights_array = env_test.get_weights_history()
-        print("weights array", weights_array)
         if weights_array.size > 0:
             num_steps, num_stocks = weights_array.shape
             date_keys = list(ticker_map.keys()) if ticker_map else []
@@ -446,7 +378,7 @@ def model_predict(args, model, test_loader, split: str = "test"):
                 step_value = step_labels[step_idx] if step_idx < len(step_labels) else step_idx
 
                 for ticker, weight in zip(tickers, weights):
-                    if weight > 0.0001:  # Only save non-negligible allocations
+                    if weight > 0.0001:
                         all_weights_data.append({
                             'run_id': record["run_id"],
                             'batch': batch_idx,
@@ -456,31 +388,26 @@ def model_predict(args, model, test_loader, split: str = "test"):
                             'weight': weight,
                             'weight_pct': weight * 100
                         })
-        
+
     log_info = persist_metrics(records, env_snapshots, args, split)
     summary = aggregate_metric_records(records)
-    
-    # Save portfolio weights to CSV
+
     if all_weights_data and log_info and 'log_dir' in log_info:
         log_dir = log_info['log_dir']
         timestamp_label = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
         weights_csv_path = os.path.join(log_dir, f"{split}_weights_{timestamp_label}.csv")
-        
         df_weights = pd.DataFrame(all_weights_data)
         df_weights.to_csv(weights_csv_path, index=False)
-        print(f"Saved portfolio weights to: {weights_csv_path}")
         log_info['weights_csv'] = weights_csv_path
-        
-        # Also save a summary showing average weights per ticker
+
         summary_weights = df_weights.groupby('ticker').agg({
             'weight': ['mean', 'std', 'min', 'max', 'count']
         }).round(6)
         summary_weights.columns = ['avg_weight', 'std_weight', 'min_weight', 'max_weight', 'num_days']
         summary_weights = summary_weights.sort_values('avg_weight', ascending=False)
-        
+
         summary_path = os.path.join(log_dir, f"{split}_weights_summary_{timestamp_label}.csv")
         summary_weights.to_csv(summary_path)
-        print(f"Saved weights summary to: {summary_path}")
         log_info['weights_summary'] = summary_path
 
     if summary:
@@ -521,24 +448,27 @@ def train_model_and_predict(model, args, train_loader, val_loader, test_loader):
             except Exception as exc:
                 print(f"Warning: could not save expert trajectories to {cache_file}: {exc}")
 
-    # --- Initialize the IRL reward network ---
-    # With flattened observation format:
-    # obs_len = 3 * num_stocks^2 + num_stocks * input_dim
-    obs_len = 3 * args.num_stocks * args.num_stocks + args.num_stocks * args.input_dim
-    
+    num_stocks = args.num_stocks
+    lookback = getattr(args, 'lookback', 30)
+    input_dim = getattr(args, 'input_dim', 6)
+    graph_size = num_stocks * num_stocks
+    ts_size = num_stocks * lookback * input_dim
+    obs_len = graph_size * 3 + ts_size
+
     if not args.multi_reward:
-        reward_net = RewardNetwork(input_dim=obs_len+1).to(args.device)
+        reward_net = RewardNetwork(input_dim=obs_len + 1).to(args.device)
     else:
         reward_net = MultiRewardNetwork(
-            input_dim=args.input_dim,
-            num_stocks=args.num_stocks,
+            input_dim=input_dim,
+            num_stocks=num_stocks,
             ind_yn=args.ind_yn,
             pos_yn=args.pos_yn,
             neg_yn=args.neg_yn,
             dd_base_weight=getattr(args, 'dd_base_weight', 1.0),
-            dd_risk_factor=getattr(args, 'dd_risk_factor', 1.0)
+            dd_risk_factor=getattr(args, 'dd_risk_factor', 1.0),
+            lookback=lookback
         ).to(args.device)
-    # Optional: resume reward network
+
     if getattr(args, 'reward_net_path', None) and os.path.exists(args.reward_net_path):
         try:
             print(f"Loading reward network from {args.reward_net_path}")
@@ -546,21 +476,19 @@ def train_model_and_predict(model, args, train_loader, val_loader, test_loader):
             reward_net.load_state_dict(state)
         except Exception as e:
             print(f"Warning: failed to load reward net: {e}")
+
     irl_trainer = MaxEntIRL(reward_net, expert_trajectories, lr=1e-4, risk_score=risk_score_value)
 
-    # --- train ---
     env_train = create_env_init(args, data_loader=train_loader)
     for i in range(args.max_epochs):
         print(f"\n=== Epoch {i+1}/{args.max_epochs} ===")
-        # 1. Train the IRL reward function
         irl_epochs = getattr(args, 'irl_epochs', 50)
         irl_trainer.train(env_train, model, num_epochs=irl_epochs,
                           batch_size=args.batch_size, device=args.device)
         print("reward net train over.")
 
-        # 2. Update the RL environment with the new reward function (only the first batch)
         for batch_idx, data in enumerate(train_loader):
-            if batch_idx > 0:  # Only process first batch
+            if batch_idx > 0:
                 break
             corr, ts_features, features, ind, pos, neg, labels, pyg_data, mask = process_data(data, device=args.device)
             env_train = StockPortfolioEnv(
@@ -574,16 +502,14 @@ def train_model_and_predict(model, args, train_loader, val_loader, test_loader):
             env_train, _ = env_train.get_sb_env()
             model.set_env(env_train)
             rl_timesteps = getattr(args, 'rl_timesteps', 10000)
-            # 3. Train the RL agent
             print(f"Training RL agent for {rl_timesteps} timesteps...")
             model = model.learn(total_timesteps=rl_timesteps)
-            # Optional evaluation is logged inside the environment callbacks
             mean_reward, std_reward = evaluate_policy(model, env_train, n_eval_episodes=1)
             print(f"Evaluation after RL training: Mean Reward = {mean_reward:.4f}, Std Reward = {std_reward:.4f}")
-        # 4. Intermediate test evaluation to print ARR/AVOL/Sharpe/MDD/CR/IR
+
         print("\n=== Intermediate Test Evaluation (after RL learn) ===")
         model_predict(args, model, test_loader, split=f"epoch{i+1}_test")
-    # Save reward network checkpoint
+
     try:
         save_dir = getattr(args, 'save_dir', './checkpoints')
         os.makedirs(save_dir, exist_ok=True)
@@ -594,7 +520,6 @@ def train_model_and_predict(model, args, train_loader, val_loader, test_loader):
     except Exception as e:
         print(f"Warning: could not save reward net: {e}")
 
-    # Final evaluation on test set
     print("\n=== Final Test Evaluation ===")
     final_eval = model_predict(args, model, test_loader, split="final_test")
 
