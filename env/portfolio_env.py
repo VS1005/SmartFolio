@@ -26,6 +26,7 @@ class StockPortfolioEnv(gym.Env):
         # Track portfolio weights history
         self.weights_history = []
         self.dates = []
+        self.prev_weights = np.zeros(self.num_stocks, dtype=np.float32)
 
         self.corr_tensor = corr
         self.ts_features_tensor = ts_features  # Expect [steps, num_stocks, lookback, feat_dim]
@@ -79,6 +80,9 @@ class StockPortfolioEnv(gym.Env):
         ts_flat_size = self.num_stocks * self.lookback * self.feat_dim
         obs_len += ts_flat_size
 
+        # Previous weights (action inertia)
+        obs_len += self.num_stocks
+
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -115,6 +119,7 @@ class StockPortfolioEnv(gym.Env):
         obs_parts.append(pos_matrix.flatten() if pos_yn else zeros_mat)
         obs_parts.append(neg_matrix.flatten() if neg_yn else zeros_mat)
         obs_parts.append(ts_data.flatten())
+        obs_parts.append(self.prev_weights.astype(np.float32))
 
         self.observation = np.concatenate(obs_parts).astype(np.float32)
         self.ror = self.ror_batch[self.current_step].cpu()
@@ -129,6 +134,7 @@ class StockPortfolioEnv(gym.Env):
         self.daily_return_s = [0.0]
         self.weights_history = []
         self.dates = []
+        self.prev_weights = np.zeros(self.num_stocks, dtype=np.float32)
         self.load_observation(ind_yn=self.ind_yn, pos_yn=self.pos_yn, neg_yn=self.neg_yn)
         return self.observation
 
@@ -157,7 +163,7 @@ class StockPortfolioEnv(gym.Env):
             self.current_step += 1
             self.load_observation(ind_yn=self.ind_yn, pos_yn=self.pos_yn, neg_yn=self.neg_yn)
 
-            prev_weights = self.weights_history[-1] if self.weights_history else np.zeros(self.num_stocks, dtype=np.float32)
+            prev_weights = self.weights_history[-1] if self.weights_history else self.prev_weights
             is_rebalancing_day = (self.current_step % self.rebalance_window == 0) or (self.current_step == 1)
 
             if is_rebalancing_day:
@@ -182,6 +188,7 @@ class StockPortfolioEnv(gym.Env):
 
             self.weights_history.append(weights.copy())
             self.dates.append(self.current_step)
+            self.prev_weights = weights.copy()
 
             if self.mode == "test" and self.current_step % self.rebalance_window == 0:
                 print(f"Step {self.current_step} [Rebalance={is_rebalancing_day}]")

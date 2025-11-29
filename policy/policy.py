@@ -38,12 +38,18 @@ class HGATNetwork(nn.Module):
             raise ValueError(
                 f"Observation too small for TemporalHGAT: feature_dim={feature_dim}, adj_size={adj_size}"
             )
-        if remaining % (self.num_stocks * self.lookback) != 0:
+        # Reserve prev_weights length
+        remaining_minus_prev = remaining - self.num_stocks
+        if remaining_minus_prev <= 0:
             raise ValueError(
-                f"Cannot derive per-stock feature dim: remaining={remaining} not divisible by "
+                f"Observation too small after accounting for prev_weights: remaining={remaining}, num_stocks={self.num_stocks}"
+            )
+        if remaining_minus_prev % (self.num_stocks * self.lookback) != 0:
+            raise ValueError(
+                f"Cannot derive per-stock feature dim: remaining_minus_prev={remaining_minus_prev} not divisible by "
                 f"num_stocks*lookback={self.num_stocks * self.lookback}"
             )
-        self.n_features = remaining // (self.num_stocks * self.lookback)
+        self.n_features = remaining_minus_prev // (self.num_stocks * self.lookback)
         if self.n_features <= 0:
             raise ValueError(f"Invalid derived n_features={self.n_features}")
 

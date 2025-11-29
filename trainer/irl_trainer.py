@@ -461,7 +461,7 @@ def train_model_and_predict(model, args, train_loader, val_loader, test_loader):
     input_dim = getattr(args, 'input_dim', 6)
     graph_size = num_stocks * num_stocks
     ts_size = num_stocks * lookback * input_dim
-    obs_len = graph_size * 3 + ts_size
+    obs_len = graph_size * 3 + ts_size + num_stocks  # +prev_weights
 
     if not args.multi_reward:
         reward_net = RewardNetwork(input_dim=obs_len + 1).to(args.device)

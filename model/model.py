@@ -137,6 +137,9 @@ class TemporalHGAT(nn.Module):
         self.pos_mlp = nn.Linear(hidden_dim * num_heads, hidden_dim)
         self.neg_mlp = nn.Linear(hidden_dim * num_heads, hidden_dim)
 
+        # Previous weights projection
+        self.prev_proj = nn.Linear(1, hidden_dim)
+
         self.sem_gat = HeteFusionAttn(in_features=hidden_dim, hidden_size=hidden_dim)
         self.pn = PairNorm(mode="PN-SI")
 
@@ -152,11 +155,13 @@ class TemporalHGAT(nn.Module):
         batch = inputs.shape[0]
         adj_size = self.num_stocks * self.num_stocks
 
-        expected_len = 3 * adj_size + self.num_stocks * self.lookback * self.input_dim
+        ts_size = self.num_stocks * self.lookback * self.input_dim
+        expected_len = 3 * adj_size + ts_size + self.num_stocks  # +prev_weights
         if inputs.shape[1] != expected_len:
             raise ValueError(
                 f"TemporalHGAT expected obs length {expected_len} (num_stocks={self.num_stocks}, "
-                f"lookback={self.lookback}, input_dim={self.input_dim}) but got {inputs.shape[1]}"
+                f"lookback={self.lookback}, input_dim={self.input_dim}, ts_size={ts_size}, "
+                f"prev_weights={self.num_stocks}) but got {inputs.shape[1]}"
             )
 
         ptr = 0
@@ -167,7 +172,10 @@ class TemporalHGAT(nn.Module):
         neg_adj = inputs[:, ptr:ptr + adj_size].reshape(batch, self.num_stocks, self.num_stocks)
         ptr += adj_size
 
-        ts_flat = inputs[:, ptr:]
+        ts_flat = inputs[:, ptr:ptr + ts_size]
+        ptr += ts_size
+        prev_weights = inputs[:, ptr:]
+
         ts_features = ts_flat.reshape(batch * self.num_stocks, self.lookback, self.input_dim)
 
         # Temporal encoding
@@ -183,14 +191,15 @@ class TemporalHGAT(nn.Module):
         pos_supp = self.pos_mlp(pos_supp)
         neg_supp = self.neg_mlp(neg_supp)
 
-        if self.no_ind and self.no_neg:
-            stacked = torch.stack([node_embeddings], dim=2)
-        elif self.no_ind:
-            stacked = torch.stack([node_embeddings, neg_supp], dim=2)
-        elif self.no_neg:
-            stacked = torch.stack([node_embeddings, ind_supp], dim=2)
-        else:
-            stacked = torch.stack([node_embeddings, ind_supp, pos_supp, neg_supp], dim=2)
+        prev_emb = self.prev_proj(prev_weights.unsqueeze(-1))
+
+        stack_list = [node_embeddings]
+        if not self.no_ind:
+            stack_list.extend([ind_supp, pos_supp])
+        if not self.no_neg:
+            stack_list.append(neg_supp)
+        stack_list.append(prev_emb)
+        stacked = torch.stack(stack_list, dim=2)
 
         fused_embedding, sem_attn = self.sem_gat(stacked.permute(0, 2, 1, 3), require_weights)
         fused_embedding = self.pn(fused_embedding)
