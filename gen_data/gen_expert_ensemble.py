@@ -1,5 +1,5 @@
 """
-Hybrid Ensemble Expert Strategy - Fixed for Weights
+Hybrid Ensemble Expert Strategy - Risk-Dynamic Allocation & Parameter Scaling
 """
 
 import numpy as np
@@ -38,10 +38,7 @@ class RobustMarkowitz:
         return cov_matrix
     
     def optimize(self, returns, expected_returns=None, constraints=None):
-        """
-        Optimize portfolio weights using robust Markowitz
-        Returns weights
-        """
+        """Optimize portfolio weights"""
         n_assets = returns.shape[1] if len(returns.shape) > 1 else len(returns)
         
         # Use historical mean if expected returns not provided
@@ -60,102 +57,68 @@ class RobustMarkowitz:
         
         cov_matrix = self.estimate_covariance(returns_2d)
         
-        # Set default constraints
+        # Constraints
         if constraints is None:
             constraints = {}
         max_weight = constraints.get('max_weight', 0.3)
         min_weight = constraints.get('min_weight', 0.01)
         
-        # Objective function: minimize -return + risk_aversion * variance
         def objective(weights):
             portfolio_return = np.dot(weights, expected_returns)
             portfolio_variance = np.dot(weights, np.dot(cov_matrix, weights))
+            # Maximize: Return - lambda * Variance
             return -portfolio_return + self.risk_aversion * portfolio_variance
         
-        # Constraints
-        cons = [
-            {'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0},  # weights sum to 1
-        ]
-        
-        # Bounds
+        cons = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0}]
         bounds = tuple((0, max_weight) for _ in range(n_assets))
-        
-        # Initial guess
         w0 = np.ones(n_assets) / n_assets
         
-        # Optimize
         result = minimize(objective, w0, method='SLSQP', bounds=bounds, constraints=cons)
-        
         weights = np.array(result.x, dtype=float)
         
-        # Clean up small weights safely
-        clipped = weights.copy()
-        clipped[clipped < min_weight] = 0.0
-        s = clipped.sum()
-        if s <= 1e-12:
-            # Fallback to non-negative normalization or equal weight
-            weights = np.maximum(weights, 0)
-            denom = weights.sum()
-            if denom <= 1e-12:
-                weights = np.ones(n_assets) / n_assets
-            else:
-                weights = weights / denom
-        else:
-            weights = clipped / s
+        # Cleanup
+        weights[weights < min_weight] = 0.0
+        weights /= (weights.sum() + 1e-8)
         
-        return weights  # ← weights
+        return weights
 
 
 class BlackLitterman:
-    """Black-Litterman model for incorporating views"""
+    """Black-Litterman model for incorporating momentum views"""
     
     def __init__(self, tau=0.05, risk_aversion=2.5):
         self.tau = tau
         self.risk_aversion = risk_aversion
     
     def generate_views(self, returns, correlation_matrix, industry_matrix, n_views=5):
-        """Generate views based on momentum and industry relationships"""
+        """Generate momentum-based views"""
         n_assets = len(returns)
-        
-        # Generate momentum-based views
         top_performers = np.argsort(-returns)[:n_views]
         
-        # Create view matrix P and view vector Q
         P = np.zeros((n_views, n_assets))
         Q = np.zeros(n_views)
         
         for i, idx in enumerate(top_performers):
             P[i, idx] = 1.0
-            Q[i] = returns[idx] * 1.2
+            Q[i] = returns[idx] * 1.2 # Expect momentum to continue
         
         return P, Q
     
     def optimize(self, returns, cov_matrix, correlation_matrix, industry_matrix, 
                  market_cap_weights=None, constraints=None):
-        """Black-Litterman optimization - returns weights"""
         n_assets = len(returns)
-        
         if market_cap_weights is None:
             market_cap_weights = np.ones(n_assets) / n_assets
         
-        # Regularize covariance to avoid singular matrices
         eps = 1e-4
-        cov_matrix = np.array(cov_matrix, dtype=float)
-        cov_matrix = cov_matrix + eps * np.eye(n_assets)
+        cov_matrix = np.array(cov_matrix, dtype=float) + eps * np.eye(n_assets)
 
-        # Implied equilibrium returns
         pi = self.risk_aversion * np.dot(cov_matrix, market_cap_weights)
-        
-        # Generate views
         P, Q = self.generate_views(returns, correlation_matrix, industry_matrix)
         
-        # View uncertainty (regularized)
         omega = np.dot(np.dot(P, self.tau * cov_matrix), P.T)
-        if omega.ndim == 0:
-            omega = np.array([[omega]])
         omega = omega + eps * np.eye(omega.shape[0])
         
-        # Black-Litterman formula with pseudo-inverse fallbacks
         tau_cov = self.tau * cov_matrix
         inv_tau_cov = np.linalg.pinv(tau_cov)
         inv_omega = np.linalg.pinv(omega)
@@ -164,88 +127,55 @@ class BlackLitterman:
         M = np.linalg.pinv(M_inverse)
         mu_bl = np.dot(M, np.dot(inv_tau_cov, pi) + np.dot(np.dot(P.T, inv_omega), Q))
         
-        # Use Robust Markowitz to optimize with BL returns
         markowitz = RobustMarkowitz(risk_aversion=self.risk_aversion)
         weights = markowitz.optimize(returns, expected_returns=mu_bl, constraints=constraints)
         
-        return weights  # ← weights
+        return weights
 
 
 class RiskParity:
     """Risk Parity / Equal Risk Contribution"""
     
-    def __init__(self):
-        pass
-    
     def optimize(self, returns, constraints=None):
-        """Risk Parity optimization - returns weights"""
         if len(returns.shape) == 1:
-            returns_2d = np.tile(returns, (5, 1))
-            returns_2d += np.random.randn(*returns_2d.shape) * 0.01
+            returns_2d = np.tile(returns, (5, 1)) + np.random.randn(5, len(returns)) * 0.01
         else:
             returns_2d = returns
         
         cov_matrix = np.cov(returns_2d.T)
         n_assets = cov_matrix.shape[0]
         
-        # Set default constraints
-        if constraints is None:
-            constraints = {}
+        if constraints is None: constraints = {}
         max_weight = constraints.get('max_weight', 0.3)
         min_weight = constraints.get('min_weight', 0.01)
         
-        # Objective: minimize sum of squared differences in risk contributions
-        def risk_contribution(weights):
+        def objective(weights):
             portfolio_vol = np.sqrt(np.dot(weights, np.dot(cov_matrix, weights)))
             marginal_contrib = np.dot(cov_matrix, weights)
             risk_contrib = weights * marginal_contrib / (portfolio_vol + 1e-8)
-            return risk_contrib
-        
-        def objective(weights):
-            rc = risk_contribution(weights)
             target_rc = np.ones(n_assets) / n_assets
-            return np.sum((rc - target_rc) ** 2)
+            return np.sum((risk_contrib - target_rc) ** 2)
         
-        # Constraints
         cons = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0}]
         bounds = tuple((0.0, max_weight) for _ in range(n_assets))
-        
-        # Initial guess
         w0 = np.ones(n_assets) / n_assets
         
-        # Optimize
         result = minimize(objective, w0, method='SLSQP', bounds=bounds, constraints=cons)
         weights = np.array(result.x, dtype=float)
         
-        # Safe cleanup for small weights
-        clipped = weights.copy()
-        clipped[clipped < min_weight] = 0.0
-        s = clipped.sum()
-        if s <= 1e-12:
-            weights = np.maximum(weights, 0)
-            denom = weights.sum()
-            if denom <= 1e-12:
-                weights = np.ones(n_assets) / n_assets
-            else:
-                weights = weights / denom
-        else:
-            weights = clipped / s
+        weights[weights < min_weight] = 0.0
+        weights /= (weights.sum() + 1e-8)
         
-        return weights  # ← weights
+        return weights
 
 
 class HRP:
     """Hierarchical Risk Parity"""
     
-    def __init__(self):
-        pass
-    
     def get_quasi_diag(self, link):
-        """Get quasi-diagonal matrix from linkage"""
         link = link.astype(int)
         sort_ix = pd.Series([link[-1, 0], link[-1, 1]])
         num_items = link[-1, 3]
-        
         while sort_ix.max() >= num_items:
             sort_ix.index = pd.Index(range(0, sort_ix.shape[0] * 2, 2))
             df0 = sort_ix[sort_ix >= num_items]
@@ -255,258 +185,164 @@ class HRP:
             df0 = pd.Series(link[j, 1], index=i + 1)
             sort_ix = pd.concat([sort_ix, df0]).sort_index()
             sort_ix.index = pd.Index(range(sort_ix.shape[0]))
-        
         return sort_ix.tolist()
     
     def get_cluster_var(self, cov, cluster_items):
-        """Calculate cluster variance"""
         cov_slice = cov.iloc[cluster_items, cluster_items]
         diag = np.diag(cov_slice)
-        diag = np.where(diag <= 1e-12, 1e-12, diag)
         w = 1.0 / diag
         w /= w.sum()
         return np.dot(w, np.dot(cov_slice, w))
     
     def get_rec_bipart(self, cov, sort_ix):
-        """Recursive bisection to get weights"""
         w = pd.Series(1.0, index=sort_ix)
         cluster_items = [sort_ix]
-        
         while len(cluster_items) > 0:
             cluster_items = [i[j:k] for i in cluster_items 
                            for j, k in ((0, len(i) // 2), (len(i) // 2, len(i))) 
                            if len(i) > 1]
-            
             for i in range(0, len(cluster_items), 2):
                 cluster0 = cluster_items[i]
                 cluster1 = cluster_items[i + 1]
-                
                 var0 = self.get_cluster_var(cov, cluster0)
                 var1 = self.get_cluster_var(cov, cluster1)
-                
                 alpha = 1 - var0 / (var0 + var1)
-                
                 w[cluster0] *= alpha
                 w[cluster1] *= 1 - alpha
-        
         return w
     
     def optimize(self, returns, constraints=None):
-        """HRP optimization - returns weights"""
         if len(returns.shape) == 1:
-            returns_2d = np.tile(returns, (5, 1))
-            returns_2d += np.random.randn(*returns_2d.shape) * 0.01
+            returns_2d = np.tile(returns, (5, 1)) + np.random.randn(5, len(returns)) * 0.01
         else:
             returns_2d = returns
         
         cov_matrix = np.cov(returns_2d.T)
         corr_matrix = np.corrcoef(returns_2d.T)
-        corr_matrix = np.nan_to_num(corr_matrix, nan=0.0, posinf=0.0, neginf=0.0)
-        n_assets = cov_matrix.shape[0]
+        corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
         
-        # Set default constraints
-        if constraints is None:
-            constraints = {}
+        if constraints is None: constraints = {}
         min_weight = constraints.get('min_weight', 0.01)
         
-        # Convert to DataFrame for easier manipulation
         cov_df = pd.DataFrame(cov_matrix)
+        dist = ((1 - corr_matrix) / 2.0) ** 0.5
+        dist = np.nan_to_num(dist)
         
-        # Hierarchical clustering
-        dist = ((1 - corr_matrix) / 2.0)
-        dist = np.where(dist < 0, 0, dist) ** 0.5
-        link = linkage(dist[np.triu_indices(n_assets, k=1)], method='single')
-        
-        # Get quasi-diagonal matrix
+        link = linkage(dist[np.triu_indices(cov_matrix.shape[0], k=1)], method='single')
         sort_ix = self.get_quasi_diag(link)
+        weights = self.get_rec_bipart(cov_df, sort_ix).values.astype(float)
         
-        # Get weights through recursive bisection
-        weights = self.get_rec_bipart(cov_df, sort_ix)
-        weights = weights.values.astype(float)
-        
-        # Safe cleanup
-        clipped = weights.copy()
-        clipped[clipped < min_weight] = 0.0
-        s = clipped.sum()
-        if s <= 1e-12:
-            weights = np.maximum(weights, 0)
-            denom = weights.sum()
-            if denom <= 1e-12:
-                weights = np.ones(n_assets) / n_assets
-            else:
-                weights = weights / denom
-        else:
-            weights = clipped / s
+        weights[weights < min_weight] = 0.0
+        weights /= (weights.sum() + 1e-8)
         
         return weights
 
 
 class HybridEnsembleExpert:
     """
-    Hybrid ensemble of multiple expert strategies
+    Hybrid ensemble that explicitly uses Risk Score to shift strategy.
     """
     
     def __init__(self, ensemble_weights=None, randomize_params=True, risk_profile=None):
-        """
-        Args:
-            ensemble_weights: Dict of weights for each expert method
-            randomize_params: Whether to randomize parameters for diversity
-            risk_profile: Optional dict describing desired risk posture
-        """
         self.risk_profile = risk_profile or {}
         self.randomize_params = randomize_params
         self.risk_score = float(self.risk_profile.get('risk_score', 0.5))
         self.max_weight = self.risk_profile.get('max_weight', 0.3)
         self.min_weight = self.risk_profile.get('min_weight', 0.01)
 
-        profile_weights = self.risk_profile.get('ensemble_weights')
-        if profile_weights:
-            ensemble_weights = profile_weights
-        elif ensemble_weights is None:
-            ensemble_weights = {
-                'robust_markowitz': 0.3,
-                'black_litterman': 0.25,
-                'risk_parity': 0.2,
-                'hrp': 0.15,
-            }
+        # === DYNAMIC STRATEGY ALLOCATION ===
+        rho = self.risk_score
+        conservative = 1.0 - rho
         
-        self.ensemble_weights = ensemble_weights
+        dynamic_weights = {
+            'robust_markowitz': 0.10 + 0.70 * rho,       # Aggressive favor
+            'black_litterman':  0.10 + 0.10 * rho,       
+            'risk_parity':      0.10 + 0.50 * conservative, # Conservative favor
+            'hrp':              0.10 + 0.20 * conservative 
+        }
         
-        # Normalize weights
-        total = sum(self.ensemble_weights.values())
-        if total <= 0:
-            total = 1.0
-        self.ensemble_weights = {k: v/total for k, v in self.ensemble_weights.items()}
-    
+        total = sum(dynamic_weights.values())
+        self.ensemble_weights = {k: v/total for k, v in dynamic_weights.items()}
+        
+        if ensemble_weights:
+            print("Info: Overriding passed ensemble_weights with risk_score derived weights.")
+
     def _get_randomized_params(self, method):
-        """Get randomized parameters for diversity"""
-        if not self.randomize_params:
-            return {}
+        """
+        Get params. If randomize_params is False, use Deterministic Risk-Based Params.
+        """
+        # Base Risk Aversion: Conservative (0.0) -> 3.0, Aggressive (1.0) -> 1.0
+        ra_base = 1.0 + (1.0 - self.risk_score) * 2.0
         
         if method == 'robust_markowitz':
-            ra_low, ra_high = self.risk_profile.get('markowitz_ra_range', (0.5, 3.0))
-            return {
-                'risk_aversion': np.random.uniform(ra_low, ra_high),
-                'regularization': np.random.uniform(0.001, 0.05),
-                'shrinkage_method': np.random.choice(['ledoit_wolf', 'oas'])
+            params = {
+                'risk_aversion': ra_base,
+                'regularization': 0.01,
+                'shrinkage_method': 'ledoit_wolf'
             }
+            if self.randomize_params:
+                params['risk_aversion'] *= np.random.uniform(0.8, 1.2)
+                params['regularization'] = np.random.uniform(0.001, 0.05)
+            return params
+            
         elif method == 'black_litterman':
-            ra_low, ra_high = self.risk_profile.get('black_litterman_ra_range', (1.0, 4.0))
-            return {
-                'tau': np.random.uniform(0.01, 0.1),
-                'risk_aversion': np.random.uniform(ra_low, ra_high)
+            params = {
+                'tau': 0.05,
+                'risk_aversion': ra_base
             }
-        else:
-            return {}
-    
-    def _build_constraints(self, constraints=None):
-        base = constraints.copy() if constraints else {}
-        base.setdefault('max_weight', self.max_weight)
-        base.setdefault('min_weight', self.min_weight)
-        return base
+            if self.randomize_params:
+                params['tau'] = np.random.uniform(0.01, 0.1)
+                params['risk_aversion'] *= np.random.uniform(0.8, 1.2)
+            return params
+            
+        return {}
     
     def generate_expert_action(self, returns, correlation_matrix, industry_matrix,
                               pos_matrix=None, neg_matrix=None, constraints=None):
-        """
-        Generate expert action using ensemble of methods
-        
-        Returns:
-         weight vector [n_assets]
-        """
         n_assets = len(returns)
         
-        constraints = self._build_constraints(constraints)
+        final_constraints = constraints.copy() if constraints else {}
+        final_constraints['max_weight'] = final_constraints.get('max_weight', self.max_weight)
+        final_constraints['min_weight'] = final_constraints.get('min_weight', self.min_weight)
         
-        # Initialize experts
-        experts = {}
+        experts = {
+            'robust_markowitz': RobustMarkowitz(**self._get_randomized_params('robust_markowitz')),
+            'black_litterman': BlackLitterman(**self._get_randomized_params('black_litterman')),
+            'risk_parity': RiskParity(),
+            'hrp': HRP()
+        }
         
-        # Robust Markowitz
-        if 'robust_markowitz' in self.ensemble_weights:
-            params = self._get_randomized_params('robust_markowitz')
-            # Sanitize params to ensure correct types
-            ra = params.get('risk_aversion', 1.0)
-            reg = params.get('regularization', 0.01)
-            sm = params.get('shrinkage_method', 'ledoit_wolf')
-            if sm not in ('ledoit_wolf', 'oas'):
-                sm = 'ledoit_wolf'
-            experts['robust_markowitz'] = RobustMarkowitz(risk_aversion=float(ra), regularization=float(reg), shrinkage_method=str(sm))
+        weights_sum = np.zeros(n_assets)
+        total_trust = 0.0
         
-        # Black-Litterman
-        if 'black_litterman' in self.ensemble_weights:
-            params = self._get_randomized_params('black_litterman')
-            experts['black_litterman'] = BlackLitterman(**params)
-        
-        # Risk Parity
-        if 'risk_parity' in self.ensemble_weights:
-            experts['risk_parity'] = RiskParity()
-        
-        # HRP
-        if 'hrp' in self.ensemble_weights:
-            experts['hrp'] = HRP()
-        
-        # Collect weights from each expert
-        expert_weights_map = {}
-        
-        for method, expert in experts.items():
+        for name, strategy in experts.items():
+            trust = self.ensemble_weights.get(name, 0.0)
+            if trust < 0.01: continue
+            
             try:
-                if method == 'black_litterman':
-                    # BL needs covariance matrix
+                if name == 'black_litterman':
                     if len(returns.shape) == 1:
-                        returns_2d = np.tile(returns, (5, 1))
-                        returns_2d += np.random.randn(*returns_2d.shape) * 0.01
-                    else:
-                        returns_2d = returns
-                    
-                    cov_matrix = np.cov(returns_2d.T)
-                    weights = expert.optimize(
-                        returns, cov_matrix, correlation_matrix, 
-                        industry_matrix, constraints=constraints
-                    )
+                        r2d = np.tile(returns, (5, 1)) + np.random.randn(5, n_assets)*0.01
+                    else: r2d = returns
+                    cov = np.cov(r2d.T)
+                    w = strategy.optimize(returns, cov, correlation_matrix, industry_matrix, constraints=final_constraints)
                 else:
-                    weights = expert.optimize(returns, constraints=constraints)
+                    w = strategy.optimize(returns, constraints=final_constraints)
                 
-                # Sanitize any NaNs/Infs from expert
-                weights = np.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0)
-                expert_weights_map[method] = weights
+                weights_sum += w * trust
+                total_trust += trust
             except Exception as e:
-                print(f"Warning: {method} failed with error: {e}")
                 continue
-        
-        if len(expert_weights_map) == 0:
-            # Fallback: simple return-weighted portfolio
-            weights = np.maximum(returns, 0)
-            weights = weights / (weights.sum() + 1e-8)
-            return weights
-        
-        # Ensemble: weighted average of weights by method name
-        ensemble_weights = np.zeros(n_assets, dtype=float)
-        for method, alpha in self.ensemble_weights.items():
-            if method in expert_weights_map:
-                ensemble_weights += alpha * expert_weights_map[method]
-        
-        # Normalize to sum to 1
-        sum_w = ensemble_weights.sum()
-        if sum_w <= 1e-12:
-            # Fallback: use positive-return weights
-            fallback = np.maximum(returns, 0)
-            denom = fallback.sum()
-            ensemble_weights = fallback / (denom + 1e-8)
+                
+        if total_trust > 0:
+            final_weights = weights_sum / total_trust
         else:
-            ensemble_weights = ensemble_weights / sum_w
-        
-        # Apply min weight threshold
-        min_weight = constraints.get('min_weight', 0.01)
-        clipped = ensemble_weights.copy()
-        clipped[clipped < min_weight] = 0.0
-        s = clipped.sum()
-        if s <= 1e-12:
-            pass
-        else:
-            ensemble_weights = clipped / s
-        
-        return ensemble_weights  
+            final_weights = np.ones(n_assets) / n_assets
+            
+        return final_weights
 
 
+# ... (Keep generate_expert_trajectories, save/load functions exactly as they were) ...
 def generate_expert_trajectories(args, dataset, num_trajectories=100, risk_profile=None):
     """
     Generate expert trajectories using hybrid ensemble
