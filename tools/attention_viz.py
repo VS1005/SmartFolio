@@ -129,7 +129,7 @@ def top_edges(matrix: np.ndarray, k: int = 5) -> List[Tuple[int, int, float]]:
     for idx in sorted_idx:
         row = int(idx // size)
         col = int(idx % size)
-        if row != col:  # Extra safety check
+        if row != col:
             results.append((row, col, float(matrix[row, col])))
     return results
 

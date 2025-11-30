@@ -28,6 +28,7 @@ import pandas as pd
 import torch
 from pandas.tseries.offsets import MonthBegin, MonthEnd
 from torch.autograd import Variable
+from torch_geometric.data import Data
 
 try:  # pragma: no cover - optional relative import when executed as module
     from .build_dataset_yf import (  # type: ignore
@@ -204,6 +205,7 @@ def _build_daily_sample(
     corr_csv: str,
     threshold: float,
     norm: bool = True,
+    industry_mat: Optional[np.ndarray] = None
 ) -> Optional[Dict[str, torch.Tensor]]:
     """Construct a single day's sample mirroring ``save_daily_graph``."""
 
@@ -229,7 +231,9 @@ def _build_daily_sample(
     corr = torch.from_numpy(corr_df.values.astype(np.float32))
     pos = torch.from_numpy(pos_adj.astype(np.float32))
     neg = torch.from_numpy(neg_adj.astype(np.float32))
-    ind = torch.eye(len(codes), dtype=torch.float32)
+    if industry_mat is None:
+            industry_mat = np.eye(len(codes), dtype=np.float32)
+    ind = torch.from_numpy(industry_mat.astype(np.float32))
 
     ts_features: List[np.ndarray] = []
     features: List[np.ndarray] = []
@@ -259,6 +263,11 @@ def _build_daily_sample(
     feat_tensor = torch.from_numpy(np.stack(features, axis=0)).float()
     label_tensor = torch.tensor(labels, dtype=torch.float32)
 
+    # Create pyg_data
+    edge_index = torch.triu_indices(ind.size(0), ind.size(0), offset=1)
+    pyg_data = Data(x=features, edge_index=edge_index)
+    pyg_data.edge_attr = ind[edge_index[0], edge_index[1]]
+
     result = {
         "corr": Variable(corr),
         "ts_features": Variable(ts_tensor),
@@ -266,6 +275,7 @@ def _build_daily_sample(
         "industry_matrix": Variable(ind),
         "pos_matrix": Variable(pos),
         "neg_matrix": Variable(neg),
+        "pyg_data" : pyg_data,
         "labels": Variable(label_tensor),
         "mask": [True] * len(labels),
     }
