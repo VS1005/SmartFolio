@@ -4,18 +4,24 @@ import torch
 from gym import spaces
 import numpy as np
 from stable_baselines3.common.vec_env import DummyVecEnv
+import sys
 
 
 class StockPortfolioEnv(gym.Env):
     def __init__(self, args, corr=None, ts_features=None, features=None,
-             ind=None, pos=None, neg=None, returns=None, pyg_data=None,
-             benchmark_return=None, mode="train", reward_net=None, device='cuda:0',
-             ind_yn=False, pos_yn=False, neg_yn=False, risk_profile=None):
+         ind=None, pos=None, neg=None, returns=None, pyg_data=None,
+         benchmark_return=None, mode="train", reward_net=None, device='cuda:0',
+         ind_yn=False, pos_yn=False, neg_yn=False, risk_profile=None):
         super(StockPortfolioEnv, self).__init__()
         
-        print("\n" + "="*80)
-        print("[ENV INIT] Starting StockPortfolioEnv initialization")
-        print("="*80)
+        # FLUSH ALL PRINTS - Force output immediately
+        def log(msg):
+            print(msg, file=sys.stderr, flush=True)
+            print(msg, flush=True)
+        
+        log("\n" + "="*80)
+        log("[ENV INIT] Starting StockPortfolioEnv initialization")
+        log("="*80)
         
         self.current_step = 0
         self.max_step = returns.shape[0] - 1
@@ -57,22 +63,31 @@ class StockPortfolioEnv(gym.Env):
         self.action_temperature = 0.5 + 2.0 * (1.0 - self.risk_score)
 
         # Debug: Print input shapes
-        print(f"[ENV INIT] returns shape: {returns.shape}")
-        print(f"[ENV INIT] num_stocks: {self.num_stocks}")
-        print(f"[ENV INIT] max_step: {self.max_step}")
+        log(f"[ENV INIT] returns shape: {returns.shape}")
+        log(f"[ENV INIT] num_stocks: {self.num_stocks}")
+        log(f"[ENV INIT] max_step: {self.max_step}")
         
         if ts_features is not None:
-            print(f"[ENV INIT] ts_features shape: {ts_features.shape}")
-            print(f"[ENV INIT] ts_features ndim: {ts_features.ndim}")
+            log(f"[ENV INIT] ts_features shape: {ts_features.shape}")
+            log(f"[ENV INIT] ts_features type: {type(ts_features)}")
+            log(f"[ENV INIT] ts_features ndim: {ts_features.ndim}")
         else:
-            print("[ENV INIT] WARNING: ts_features is None!")
+            log("[ENV INIT] WARNING: ts_features is None!")
         
         if ind is not None:
-            print(f"[ENV INIT] ind shape: {ind.shape}")
+            log(f"[ENV INIT] ind shape: {ind.shape}")
+        else:
+            log("[ENV INIT] WARNING: ind is None!")
+            
         if pos is not None:
-            print(f"[ENV INIT] pos shape: {pos.shape}")
+            log(f"[ENV INIT] pos shape: {pos.shape}")
+        else:
+            log("[ENV INIT] WARNING: pos is None!")
+            
         if neg is not None:
-            print(f"[ENV INIT] neg shape: {neg.shape}")
+            log(f"[ENV INIT] neg shape: {neg.shape}")
+        else:
+            log("[ENV INIT] WARNING: neg is None!")
 
         # Action space
         self.action_space = spaces.Box(
@@ -85,48 +100,55 @@ class StockPortfolioEnv(gym.Env):
         self.top_k = max(1, int(0.1 * self.num_stocks))
 
         # CRITICAL: Extract lookback and feat_dim correctly
-        print("\n[ENV INIT] Extracting lookback and feat_dim...")
+        log("\n[ENV INIT] Extracting lookback and feat_dim...")
         
         if ts_features is not None:
             ts_shape = ts_features.shape
-            print(f"[ENV INIT] ts_features shape: {ts_shape}")
+            log(f"[ENV INIT] ts_features shape: {ts_shape}")
+            log(f"[ENV INIT] ts_shape length: {len(ts_shape)}")
             
             # Handle different tensor formats
             if len(ts_shape) == 4:
                 # (batch, num_stocks, lookback, feat_dim)
                 self.lookback = ts_shape[2]
                 self.feat_dim = ts_shape[3]
-                print(f"[ENV INIT] 4D tensor detected: lookback={self.lookback}, feat_dim={self.feat_dim}")
+                log(f"[ENV INIT] 4D tensor detected: lookback={self.lookback}, feat_dim={self.feat_dim}")
             elif len(ts_shape) == 3:
                 # (num_stocks, lookback, feat_dim)
                 self.lookback = ts_shape[1]
                 self.feat_dim = ts_shape[2]
-                print(f"[ENV INIT] 3D tensor detected: lookback={self.lookback}, feat_dim={self.feat_dim}")
+                log(f"[ENV INIT] 3D tensor detected: lookback={self.lookback}, feat_dim={self.feat_dim}")
             else:
-                raise ValueError(f"[ENV INIT] ERROR: ts_features has unexpected shape {ts_shape}. Expected 3D or 4D.")
+                error_msg = f"[ENV INIT] ERROR: ts_features has unexpected shape {ts_shape}. Expected 3D or 4D."
+                log(error_msg)
+                raise ValueError(error_msg)
         else:
             # Fallback to args if ts_features not provided
             self.lookback = getattr(args, "lookback", 30)
             self.feat_dim = getattr(args, "input_dim", 6)
-            print(f"[ENV INIT] Using fallback from args: lookback={self.lookback}, feat_dim={self.feat_dim}")
+            log(f"[ENV INIT] Using fallback from args: lookback={self.lookback}, feat_dim={self.feat_dim}")
 
-        print(f"[ENV INIT] Final values: lookback={self.lookback}, feat_dim={self.feat_dim}")
+        log(f"[ENV INIT] Final values: lookback={self.lookback}, feat_dim={self.feat_dim}")
 
         # Calculate observation space size
         adj_size = self.num_stocks * self.num_stocks
-        print(f"\n[ENV INIT] Calculating observation space:")
-        print(f"[ENV INIT]   Adjacency matrix size: {adj_size} (for each of 3 matrices)")
-        print(f"[ENV INIT]   Total adjacency: {adj_size * 3}")
+        log(f"\n[ENV INIT] Calculating observation space:")
+        log(f"[ENV INIT]   num_stocks={self.num_stocks}")
+        log(f"[ENV INIT]   lookback={self.lookback}")
+        log(f"[ENV INIT]   feat_dim={self.feat_dim}")
+        log(f"[ENV INIT]   Adjacency matrix size: {adj_size} (for each of 3 matrices)")
+        log(f"[ENV INIT]   Total adjacency (3 matrices): {adj_size * 3}")
         
         ts_flat_size = self.num_stocks * self.lookback * self.feat_dim
-        print(f"[ENV INIT]   TS features flat size: {self.num_stocks} * {self.lookback} * {self.feat_dim} = {ts_flat_size}")
+        log(f"[ENV INIT]   TS features flat size: {self.num_stocks} * {self.lookback} * {self.feat_dim} = {ts_flat_size}")
         
         prev_weights_size = self.num_stocks
-        print(f"[ENV INIT]   Previous weights size: {prev_weights_size}")
+        log(f"[ENV INIT]   Previous weights size: {prev_weights_size}")
         
         obs_len = (adj_size * 3) + ts_flat_size + prev_weights_size
-        print(f"[ENV INIT]   TOTAL OBSERVATION SIZE: {obs_len}")
-        print(f"[ENV INIT]     = {adj_size * 3} + {ts_flat_size} + {prev_weights_size}")
+        log(f"\n[ENV INIT]   TOTAL OBSERVATION SIZE: {obs_len}")
+        log(f"[ENV INIT]     = ({adj_size} * 3) + {ts_flat_size} + {prev_weights_size}")
+        log(f"[ENV INIT]     = {adj_size * 3} + {ts_flat_size} + {prev_weights_size}")
 
         # Observation space
         self.observation_space = spaces.Box(
@@ -136,75 +158,94 @@ class StockPortfolioEnv(gym.Env):
             dtype=np.float32,
         )
         
-        print(f"[ENV INIT] Observation space shape: {self.observation_space.shape}")
-        print("="*80 + "\n")
+        log(f"[ENV INIT] Observation space shape: {self.observation_space.shape}")
+        log("="*80 + "\n")
+        sys.stdout.flush()
+        sys.stderr.flush()
 
     def load_observation(self, ts_yn=False, ind_yn=False, pos_yn=False, neg_yn=False):
         """Load observation at current step with detailed debugging."""
         
-        print(f"\n[LOAD_OBS] Step {self.current_step}")
+        def log(msg):
+            print(msg, file=sys.stderr, flush=True)
+            print(msg, flush=True)
         
-        # Adjacency matrices
-        if torch.is_tensor(self.ind_tensor):
-            ind_matrix = self.ind_tensor[self.current_step].cpu().numpy()
-            pos_matrix = self.pos_tensor[self.current_step].cpu().numpy()
-            neg_matrix = self.neg_tensor[self.current_step].cpu().numpy()
-        else:
-            ind_matrix = self.ind_tensor[self.current_step]
-            pos_matrix = self.pos_tensor[self.current_step]
-            neg_matrix = self.neg_tensor[self.current_step]
+        log(f"\n[LOAD_OBS] Step {self.current_step}")
+        
+        try:
+            # Adjacency matrices
+            if torch.is_tensor(self.ind_tensor):
+                ind_matrix = self.ind_tensor[self.current_step].cpu().numpy()
+                pos_matrix = self.pos_tensor[self.current_step].cpu().numpy()
+                neg_matrix = self.neg_tensor[self.current_step].cpu().numpy()
+            else:
+                ind_matrix = self.ind_tensor[self.current_step]
+                pos_matrix = self.pos_tensor[self.current_step]
+                neg_matrix = self.neg_tensor[self.current_step]
 
-        print(f"[LOAD_OBS]   ind_matrix shape: {ind_matrix.shape}")
-        print(f"[LOAD_OBS]   pos_matrix shape: {pos_matrix.shape}")
-        print(f"[LOAD_OBS]   neg_matrix shape: {neg_matrix.shape}")
+            log(f"[LOAD_OBS]   ind_matrix shape: {ind_matrix.shape}")
+            log(f"[LOAD_OBS]   pos_matrix shape: {pos_matrix.shape}")
+            log(f"[LOAD_OBS]   neg_matrix shape: {neg_matrix.shape}")
 
-        # Time-series features
-        if torch.is_tensor(self.ts_features_tensor):
-            ts_data = self.ts_features_tensor[self.current_step].cpu().numpy()
-        else:
-            ts_data = self.ts_features_tensor[self.current_step]
+            # Time-series features
+            if torch.is_tensor(self.ts_features_tensor):
+                ts_data = self.ts_features_tensor[self.current_step].cpu().numpy()
+            else:
+                ts_data = self.ts_features_tensor[self.current_step]
 
-        print(f"[LOAD_OBS]   ts_data shape: {ts_data.shape}")
-        print(f"[LOAD_OBS]   Expected shape: ({self.num_stocks}, {self.lookback}, {self.feat_dim})")
+            log(f"[LOAD_OBS]   ts_data shape: {ts_data.shape}")
+            log(f"[LOAD_OBS]   ts_data type: {type(ts_data)}")
+            log(f"[LOAD_OBS]   Expected shape: ({self.num_stocks}, {self.lookback}, {self.feat_dim})")
 
-        if ts_data.shape != (self.num_stocks, self.lookback, self.feat_dim):
-            print(f"[LOAD_OBS] ERROR: Shape mismatch!")
-            print(f"[LOAD_OBS]   Got: {ts_data.shape}")
-            print(f"[LOAD_OBS]   Expected: ({self.num_stocks}, {self.lookback}, {self.feat_dim})")
-            raise ValueError(
-                f"ts_features shape {ts_data.shape} does not match expected "
-                f"({self.num_stocks}, {self.lookback}, {self.feat_dim})"
-            )
+            if ts_data.shape != (self.num_stocks, self.lookback, self.feat_dim):
+                error_msg = (
+                    f"[LOAD_OBS] ERROR: Shape mismatch!\n"
+                    f"[LOAD_OBS]   Got: {ts_data.shape}\n"
+                    f"[LOAD_OBS]   Expected: ({self.num_stocks}, {self.lookback}, {self.feat_dim})"
+                )
+                log(error_msg)
+                raise ValueError(error_msg)
 
-        obs_parts = []
-        zeros_mat = np.zeros(self.num_stocks * self.num_stocks, dtype=np.float32)
+            obs_parts = []
+            zeros_mat = np.zeros(self.num_stocks * self.num_stocks, dtype=np.float32)
+            
+            part_ind = ind_matrix.flatten() if ind_yn else zeros_mat
+            part_pos = pos_matrix.flatten() if pos_yn else zeros_mat
+            part_neg = neg_matrix.flatten() if neg_yn else zeros_mat
+            part_ts = ts_data.flatten()
+            part_prev = self.prev_weights.astype(np.float32)
+            
+            log(f"[LOAD_OBS]   part_ind size: {part_ind.shape[0]}")
+            log(f"[LOAD_OBS]   part_pos size: {part_pos.shape[0]}")
+            log(f"[LOAD_OBS]   part_neg size: {part_neg.shape[0]}")
+            log(f"[LOAD_OBS]   part_ts size: {part_ts.shape[0]}")
+            log(f"[LOAD_OBS]   part_prev size: {part_prev.shape[0]}")
+            
+            obs_parts = [part_ind, part_pos, part_neg, part_ts, part_prev]
+            self.observation = np.concatenate(obs_parts).astype(np.float32)
+            
+            log(f"[LOAD_OBS]   Final observation size: {self.observation.shape[0]}")
+            log(f"[LOAD_OBS]   Expected size: {self.observation_space.shape[0]}")
+            
+            if self.observation.shape[0] != self.observation_space.shape[0]:
+                error_msg = (
+                    f"[LOAD_OBS] ERROR: Observation size mismatch!\n"
+                    f"[LOAD_OBS]   Got: {self.observation.shape[0]}\n"
+                    f"[LOAD_OBS]   Expected: {self.observation_space.shape[0]}"
+                )
+                log(error_msg)
+                raise ValueError(error_msg)
+            
+            self.ror = self.ror_batch[self.current_step].cpu()
+            log("[LOAD_OBS] ✓ Observation loaded successfully")
+            
+        except Exception as e:
+            log(f"[LOAD_OBS] EXCEPTION: {str(e)}")
+            log(f"[LOAD_OBS] Exception type: {type(e)}")
+            raise
         
-        part_ind = ind_matrix.flatten() if ind_yn else zeros_mat
-        part_pos = pos_matrix.flatten() if pos_yn else zeros_mat
-        part_neg = neg_matrix.flatten() if neg_yn else zeros_mat
-        part_ts = ts_data.flatten()
-        part_prev = self.prev_weights.astype(np.float32)
-        
-        print(f"[LOAD_OBS]   part_ind size: {part_ind.shape[0]}")
-        print(f"[LOAD_OBS]   part_pos size: {part_pos.shape[0]}")
-        print(f"[LOAD_OBS]   part_neg size: {part_neg.shape[0]}")
-        print(f"[LOAD_OBS]   part_ts size: {part_ts.shape[0]}")
-        print(f"[LOAD_OBS]   part_prev size: {part_prev.shape[0]}")
-        
-        obs_parts = [part_ind, part_pos, part_neg, part_ts, part_prev]
-        self.observation = np.concatenate(obs_parts).astype(np.float32)
-        
-        print(f"[LOAD_OBS]   Final observation size: {self.observation.shape[0]}")
-        print(f"[LOAD_OBS]   Expected size: {self.observation_space.shape[0]}")
-        
-        if self.observation.shape[0] != self.observation_space.shape[0]:
-            print(f"[LOAD_OBS] ERROR: Observation size mismatch!")
-            raise ValueError(
-                f"Observation size {self.observation.shape[0]} doesn't match "
-                f"observation space size {self.observation_space.shape[0]}"
-            )
-        
-        self.ror = self.ror_batch[self.current_step].cpu()
+        sys.stdout.flush()
+        sys.stderr.flush()
     def reset(self):
         self.current_step = 0
         self.done = False
