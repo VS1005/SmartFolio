@@ -35,6 +35,7 @@ def _build_args(cfg: XAIRequest, start_date: str, end_date: str) -> List[str]:
         "--tickers-csv",
         "tickers.csv",
     ]
+    argv.extend(["--max-steps", str(cfg.lookback_days)])
     if cfg.monthly_run_id:
         argv.extend(["--focus-run-id", cfg.monthly_run_id])
     if cfg.top_k:
