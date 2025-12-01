@@ -1,0 +1,13 @@
+{
+  "horizon": "1",
+  "relation_type": "hy",
+  "num_stocks": 97,
+  "input_dim": 6,
+  "lookback": 20,
+  "obs_dim": 39964,
+  "total_steps": 230,
+  "model_path": "checkpoints/checkpoints (3)/checkpoints/baseline.zip",
+  "dataset_dir": "/home/var_alpha/projects/SmartFolio/dataset_default/data_train_predict_custom/1_hy",
+  "max_steps": null,
+  "save_attention": false
+}
