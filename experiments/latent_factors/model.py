@@ -104,6 +104,12 @@ class TopKSparseAutoencoder(nn.Module):
         # Initialize latent bias to encourage initial activation
         nn.init.uniform_(self.latent_bias, -0.1, 0.1)
     
+    def set_pre_bias_from_data(self, data: torch.Tensor):
+        """Set pre-bias to the mean of the data for better centering."""
+        if self.use_pre_bias:
+            with torch.no_grad():
+                self.pre_bias.data = data.mean(dim=0)
+    
     def _normalize_decoder_weights(self):
         """Normalize decoder output columns to unit norm (for interpretability)."""
         if self.normalize_decoder and self.decoder_out is not None:
@@ -114,6 +120,9 @@ class TopKSparseAutoencoder(nn.Module):
         """
         Apply TopK activation: keep only top-k values, zero the rest.
         Returns: (sparse_activation, mask)
+        
+        Note: We keep the raw top-k values without ReLU. The TopK itself
+        provides sparsity. Applying ReLU after would double-penalize negative values.
         """
         batch_size = pre_act.shape[0]
         k = min(self.k, self.latent_dim)
@@ -121,9 +130,9 @@ class TopKSparseAutoencoder(nn.Module):
         # Get top-k indices
         topk_values, topk_indices = torch.topk(pre_act, k, dim=-1)
         
-        # Create sparse activation
+        # Create sparse activation - keep raw top-k values (not ReLU'd)
         sparse_act = torch.zeros_like(pre_act)
-        sparse_act.scatter_(-1, topk_indices, F.relu(topk_values))
+        sparse_act.scatter_(-1, topk_indices, topk_values)
         
         # Create mask for auxiliary loss
         mask = torch.zeros_like(pre_act, dtype=torch.bool)
@@ -336,19 +345,22 @@ def topk_sae_loss(
     Components:
     1. MSE reconstruction loss
     2. Auxiliary loss: encourages dead latents to activate (prevents dead neurons)
+       Only penalizes masked-out activations that are close to the threshold
     """
     # Main reconstruction loss
     mse = F.mse_loss(recon, target)
     
-    # Auxiliary loss: penalize pre-activations that are positive but got masked out
-    # This encourages dormant latents to eventually cross the TopK threshold
+    # Auxiliary loss: encourage masked-out latents near the threshold to activate
+    # This is less aggressive than penalizing all masked-out positive values
     aux_loss = torch.tensor(0.0, device=recon.device)
     if use_auxiliary and "pre_act" in aux_info and "mask" in aux_info:
         pre_act = aux_info["pre_act"]
         mask = aux_info["mask"]
-        # For masked-out latents, penalize positive pre-activations (they "wanted" to fire)
-        masked_out_positive = F.relu(pre_act) * (~mask).float()
-        aux_loss = masked_out_positive.mean()
+        
+        # For masked-out latents, compute how close they are to being in top-k
+        # Use squared penalty for masked-out activations (encourages competition)
+        masked_out_acts = pre_act * (~mask).float()
+        aux_loss = (masked_out_acts ** 2).mean()
     
     loss = mse + aux_weight * aux_loss
     
