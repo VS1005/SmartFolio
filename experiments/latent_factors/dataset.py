@@ -37,10 +37,19 @@ class TraceDataset(Dataset):
             # This allows the SAE to learn per-stock concepts
             self.activations_flat = self.activations.reshape(-1, self.activations.shape[-1])
             self.data_source = "activations"
+        elif "obs" in data:
+            # Backward compatibility: use obs if activations not available
+            print("Warning: Using 'obs' instead of 'activations'. Consider re-running collect_traces.py")
+            self.activations = data["obs"].astype(np.float32)
+            # If obs is 2D, use directly; if 3D, flatten
+            if len(self.activations.shape) == 2:
+                self.activations_flat = self.activations
+            else:
+                self.activations_flat = self.activations.reshape(-1, self.activations.shape[-1])
+            self.data_source = "obs"
         else:
             raise ValueError(
-                "Dataset missing 'activations'. Please re-run collect_traces.py with the updated code "
-                "to capture agent internal embeddings."
+                "Dataset missing 'activations' or 'obs'. Please provide valid training data."
             )
 
         # Keep other fields for reference/alignment

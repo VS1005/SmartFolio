@@ -173,6 +173,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Model: {args.model_type}, Latents: {args.latent_dim}, K: {args.k if args.model_type=='topk' else 'N/A'}")
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     
+    # Initialize pre-bias from data for better centering (TopK models only)
+    if args.model_type == "topk" and hasattr(model, "set_pre_bias_from_data"):
+        print("Initializing pre-bias from training data...")
+        sample_data = next(iter(train_loader))["input"].to(device)
+        model.set_pre_bias_from_data(sample_data)
+    
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     scheduler = None
@@ -222,6 +228,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             losses["loss"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            
+            # Normalize decoder weights for TopK models (improves interpretability)
+            if args.model_type == "topk" and hasattr(model, "_normalize_decoder_weights"):
+                model._normalize_decoder_weights()
             
             if args.scheduler == "onecycle" and scheduler is not None:
                 scheduler.step()
@@ -295,5 +305,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(history, f, indent=2)
 
-    if __name__ == "__main__":
-        main()
+
+if __name__ == "__main__":
+    main()
