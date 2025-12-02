@@ -83,6 +83,12 @@ class StockPortfolioEnv(gym.Env):
         # Previous weights (action inertia)
         obs_len += self.num_stocks
 
+        if os.environ.get("DEBUG_MODEL_SHAPES"):
+            print(
+                f"[EnvDebug] num_stocks={self.num_stocks} lookback={self.lookback} "
+                f"feat_dim={self.feat_dim} obs_len={obs_len} ts_shape={self.ts_features_tensor.shape}"
+            )
+
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
