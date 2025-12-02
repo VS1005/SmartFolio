@@ -406,6 +406,9 @@ def run(args: argparse.Namespace) -> None:
     existing_tickers = cast(List[str], manifest.get("tickers", []))
     manifest["tickers"] = sorted(set(existing_tickers) | set(codes))
     manifest["raw_snapshot"] = raw_path
+    # Persist the dataset base directory (and monthly subdir) for downstream consumers
+    manifest["base_dir"] = data_dir
+    manifest["monthly_dir"] = os.path.join(data_dir, "monthly")
 
     _dump_manifest(manifest_path, manifest)
     print(f"Saved monthly shard for {month_tag} with {len(valid_dates)} trading days -> {shard_path}")

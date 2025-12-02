@@ -410,7 +410,7 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
         return datetime.strptime(month_label, "%Y-%m")
 
     shard_idx, shard, month_label, month_start, month_end = max(unprocessed, key=_month_sort_key)
-
+    
     base_dir = (
         shard.get("data_dir")
         or shard.get("base_dir")
@@ -567,7 +567,8 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
         "processed_at": datetime.utcnow().isoformat(timespec="seconds"),
     })
     if isinstance(shards, dict):
-        manifest["monthly_shards"][month_label] = shard.get("shard_path") or shard
+        # Preserve metadata (processed flag, checkpoint, processed_at) even when manifest stores shards as a mapping
+        manifest["monthly_shards"][month_label] = shard
     else:
         manifest["monthly_shards"][shard_idx] = shard
     manifest["last_fine_tuned_month"] = month_label

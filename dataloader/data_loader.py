@@ -129,6 +129,29 @@ class AllGraphDataSampler(data.Dataset):
 
     def _build_monthly_index(self) -> Dict[str, str]:
         daily_index = self.manifest.get("daily_index", {}) if isinstance(self.manifest, dict) else {}
+        # Fallback: derive daily_index from monthly_shards if missing
+        if isinstance(self.manifest, dict) and not daily_index:
+            shards = self.manifest.get("monthly_shards", {})
+            if isinstance(shards, dict):
+                for month_label, rel_path in shards.items():
+                    shard_path = os.path.join(self.data_dir, rel_path)
+                    if not os.path.exists(shard_path):
+                        continue
+                    try:
+                        cache = pickle.load(open(shard_path, "rb"))
+                    except Exception:
+                        continue
+                    if isinstance(cache, dict) and "dates" in cache:
+                        for dt in cache["dates"]:
+                            daily_index[dt] = rel_path
+                if daily_index:
+                    # Persist the reconstructed daily_index to avoid doing this repeatedly
+                    self.manifest["daily_index"] = daily_index
+                    try:
+                        with open(self.manifest_path, "w", encoding="utf-8") as fh:
+                            json.dump(self.manifest, fh, indent=2, sort_keys=True)
+                    except Exception:
+                        pass
         resolved = {}
         for date, rel_path in daily_index.items():
             resolved[date] = os.path.join(self.data_dir, rel_path)
