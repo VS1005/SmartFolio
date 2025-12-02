@@ -50,6 +50,7 @@ class HGATNetwork(nn.Module):
                 f"num_stocks*lookback={self.num_stocks * self.lookback}"
             )
         self.n_features = remaining_minus_prev // (self.num_stocks * self.lookback)
+        print(f"Derived n_features={self.n_features} from feature_dim={feature_dim}")
         if self.n_features <= 0:
             raise ValueError(f"Invalid derived n_features={self.n_features}")
 
