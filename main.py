@@ -702,6 +702,8 @@ if __name__ == '__main__':
         action="store_true",
         help="Skip configuring TensorBoard logging to avoid importing the optional dependency.",
     )
+    parser.add_argument("--n_steps", type=int, default=2048, help="Rollout horizon (environment steps) per PPO update cycle")
+    
     # Risk-adaptive reward parameters
     parser.add_argument("--risk_score", type=float, default=0.5, help="User risk score: 0=conservative, 1=aggressive")
     parser.add_argument("--dd_base_weight", type=float, default=1.0, help="Base weight for drawdown penalty")
