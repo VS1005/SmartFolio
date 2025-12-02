@@ -581,6 +581,22 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     model.save(out_path)
     print(f"Saved fine-tuned checkpoint to {out_path}")
 
+    # Optional promotion gating (align with base training)
+    gate_summary = None
+    gate_log = None
+    try:
+        # Reuse model_predict to obtain evaluation summary/log on test split for gating
+        gate_result = model_predict(args, model, test_loader, split=f"{month_label}_gate")
+        gate_summary = gate_result.get("summary") if isinstance(gate_result, dict) else None
+        gate_log = gate_result.get("log") if isinstance(gate_result, dict) else None
+    except Exception as exc:
+        print(f"Warning: promotion gating evaluation failed: {exc}")
+
+    try:
+        apply_promotion_gate(args, out_path, gate_summary, gate_log)
+    except Exception as exc:
+        print(f"Warning: promotion gating failed: {exc}")
+
     # Update manifest bookkeeping
     shard.update({
         "processed": True,

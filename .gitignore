@@ -23,7 +23,7 @@ dist/
 
 *_summary.md
 
-# checkpoints/
+checkpoints/
 logs/
 
 .DS_Store
