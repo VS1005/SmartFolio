@@ -68,27 +68,24 @@ class StabilityRequest(BaseModel):
 
 
 class FinetuneRequest(BaseModel):
-    manifest_path: str = "dataset_default/data_train_predict_custom/1_hy/monthly_manifest.json"
     save_dir: str = "./checkpoints"
     device: str = "cpu"
-    run_monthly_fine_tune: bool = True
     market: str = "custom"
     horizon: str = "1"
     relation_type: str = "hy"
     fine_tune_steps: int = 1
     baseline_checkpoint: Optional[str] = "checkpoints/baseline(1).zip"
-    promotion_min_sharpe: float = 0.5
-    promotion_max_drawdown: float = 0.2
     resume_model_path: Optional[str] = "checkpoints/baseline(1).zip"
     reward_net_path: Optional[str] = "checkpoints/reward_net_custom_20251202_164846.pt"
     batch_size: int = 16
     n_steps: int = 2048
-    num_stocks: int = 97
     # PTR PPO arguments
     ptr_mode: bool = True  # Enable PTR PPO for continual learning
     ptr_coef: float = 0.1  # Coefficient for PTR loss (KL divergence penalty)
     ptr_memory_size: int = 1000  # Maximum samples in PTR replay buffer
-    ptr_priority_type: str = "max"  # Replay buffer priority aggregation strategy
+    # Data fetching
+    fetch_new_data: bool = False  # If True, fetch latest month from yfinance before fine-tuning
+    tickers_file: str = "tickers.csv"  # Path to tickers CSV file
 
     model_config = {
         "json_schema_extra": {
@@ -383,9 +380,30 @@ def stability(req: StabilityRequest):
 @app.post("/finetune")
 def finetune(req: FinetuneRequest):
     try:
-        # Auto-detect num_stocks from a sample pickle file (same as main.py)
         import pickle
+        
+        # If fetch_new_data is enabled, we might not have existing data yet
         data_dir = f'dataset_default/data_train_predict_{req.market}/{req.horizon}_{req.relation_type}/'
+        
+        # Optionally fetch new data BEFORE we check for pkl files
+        # This allows us to fetch data for a fresh month before fine-tuning
+        if req.fetch_new_data:
+            try:
+                from gen_data.update_monthly_dataset import fetch_latest_month_data
+                print("Fetching latest month data from yfinance...")
+                fetched_month = fetch_latest_month_data(
+                    market=req.market,
+                    horizon=int(req.horizon),
+                    relation_type=req.relation_type,
+                    tickers_file=req.tickers_file,
+                    lookback=30,
+                )
+                print(f"Successfully fetched data for month: {fetched_month}")
+            except Exception as e:
+                print(f"Warning: Could not fetch new data: {e}")
+                print("Continuing with existing data...")
+        
+        # Auto-detect num_stocks from a sample pickle file (same as main.py)
         sample_files = [f for f in os.listdir(data_dir) if f.endswith('.pkl')]
         if sample_files:
             sample_path = os.path.join(data_dir, sample_files[0])
@@ -414,45 +432,24 @@ def finetune(req: FinetuneRequest):
             neg_yn=True,
             ptr_coef=req.ptr_coef,
             ptr_memory_size=req.ptr_memory_size,
-            ptr_priority_type=req.ptr_priority_type,
             batch_size=req.batch_size,
             n_steps=req.n_steps,
-            tickers_file="tickers.csv",
-            multi_reward_yn=True,
+            tickers_file=req.tickers_file,
             resume_model_path=req.resume_model_path,
             reward_net_path=req.reward_net_path,
             fine_tune_steps=req.fine_tune_steps,
             save_dir=req.save_dir,
             baseline_checkpoint=req.baseline_checkpoint,
-            promotion_min_sharpe=req.promotion_min_sharpe,
-            promotion_max_drawdown=req.promotion_max_drawdown,
-            run_monthly_fine_tune=True,
-            discover_months_with_pathway=False,
-            month_cutoff_days=None,
-            min_month_days=10,
-            expert_cache_path=None,
-            irl_epochs=5,
-            rl_timesteps=1,
-            risk_score=0.5,
-            dd_base_weight=1.0,
-            dd_risk_factor=1.0,
             market=req.market,
             seed=123,
             input_dim=6,
-            ind=True,
-            pos=True,
-            neg=True,
-            relation="hy",
             num_stocks=num_stocks,
             lookback=30,
-            finrag_prior=None,
-            finrag_weights_path=None,
-            manifest=None,
             ptr_mode=req.ptr_mode,
         )
         
-        # Call fine_tune_month (returns checkpoint path AND new replay samples)
-        checkpoint, new_samples = fine_tune_month(args, manifest_path=req.manifest_path, replay_buffer=replay_buffer)
+        # Call fine_tune_month (no need to pass fetch_new_data again since we did it above)
+        checkpoint, new_samples = fine_tune_month(args, replay_buffer=replay_buffer, fetch_new_data=False)
         
         # Update replay buffer with new samples (same as main.py)
         if new_samples:

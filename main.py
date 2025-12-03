@@ -20,6 +20,7 @@ from torch_geometric.loader import DataLoader
 from utils.risk_profile import build_risk_profile
 from tools.pathway_temporal import discover_monthly_shards_with_pathway
 from tools.pathway_monthly_builder import build_monthly_shards_with_pathway
+from gen_data.update_monthly_dataset import fetch_latest_month_data
 
 import shutil
 import pickle
@@ -283,162 +284,81 @@ def select_replay_samples(model, env, dataset, k_percent=0.3):
     print(f"Selected {len(selected_samples)} replay samples from {len(dataset)} total.")
     return selected_samples
 
-def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_path=None, replay_buffer=None):
-    """Fine-tune the PPO model on the latest unprocessed monthly shard."""
-    manifest_file = str(_resolve_manifest_path(args, manifest_path))
-    if not os.path.exists(manifest_file):
-        # Attempt to build manifest: first via Pathway, then via monthly dataset updater
-        built = False
-        if getattr(args, "discover_months_with_pathway", False):
-            base_dir_guess = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
-            try:
-                shards = build_monthly_shards_with_pathway(
-                    base_dir_guess,
-                    manifest_file,
-                    min_days=getattr(args, "min_month_days", 10),
-                    cutoff_days=getattr(args, "month_cutoff_days", None),
-                )
-                print(
-                    f"Built manifest at {manifest_file} with {len(shards)} monthly shards from {base_dir_guess}"
-                )
-                built = True
-            except Exception as exc:
-                print(f"Pathway build failed: {exc}")
-        if (not built):
-            try:
-                from gen_data import update_monthly_dataset
-                print("hello in monthly dataset updater")
-                updater_args = argparse.Namespace(
-                    market=args.market,
-                    horizon=int(args.horizon),
-                    relation_type=args.relation_type,
-                    lookback=getattr(args, "lookback", 30),
-                    threshold=0.5,
-                    n_clusters=8,
-                    disable_norm=False,
-                    dataset_root=None,
-                    corr_root=None,
-                    raw_path=None,
-                    tickers_file=args.tickers_file
-                )
-                print(f"Manifest missing; running monthly dataset updater to create {manifest_file}")
-                update_monthly_dataset.run(updater_args)
-                built = os.path.exists(manifest_file)
-            except Exception as exc:
-                print(f"Monthly dataset updater failed: {exc}")
-        if not built:
-            raise FileNotFoundError(f"Monthly manifest not found at {manifest_file} and auto-build failed")
-
-    with open(manifest_file, "r", encoding="utf-8") as fh:
-        manifest = json.load(fh)
-        print("manifest file loaded")
-
-    shards = manifest.get("monthly_shards", {})
-    print("shards", shards)
-    # If manifest lacks shards, optionally discover them using Pathway temporal.session windowing.
-    if (not shards) and getattr(args, "discover_months_with_pathway", False):
-        base_dir_guess = manifest.get(
-            "base_dir",
-            f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/',
-        )
+def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buffer=None, fetch_new_data=False):
+    """
+    Fine-tune the PPO model on the latest month derived from pkl files in the data directory.
+    
+    Simple logic:
+    1. Optionally fetch new data from yfinance (if fetch_new_data=True)
+    2. Scan pkl files in data_dir (named like 2024-11-29.pkl)
+    3. Parse dates from filenames
+    4. Group by month (YYYY-MM)
+    5. Find the latest month with data
+    6. Fine-tune on that month's data
+    
+    Args:
+        args: Namespace with market, horizon, relation_type, etc.
+        manifest_path: Deprecated (ignored)
+        bookkeeping_path: Deprecated (ignored)
+        replay_buffer: Optional list of replay samples from previous training
+        fetch_new_data: If True, fetch latest month from yfinance before fine-tuning
+    """
+    # Data directory containing daily pkl files
+    base_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
+    
+    # Optionally fetch new data from yfinance
+    if fetch_new_data:
         try:
-            discovered = build_monthly_shards_with_pathway(
-                base_dir_guess,
-                manifest_file,
-                min_days=getattr(args, "min_month_days", 10),
-                cutoff_days=getattr(args, "month_cutoff_days", None),
+            print("Fetching latest month data from yfinance...")
+            tickers_file = getattr(args, "tickers_file", "tickers.csv")
+            fetched_month = fetch_latest_month_data(
+                market=args.market,
+                horizon=args.horizon,
+                relation_type=args.relation_type,
+                tickers_file=tickers_file,
+                lookback=getattr(args, "lookback", 20),
             )
-            shards = discovered
-            manifest["monthly_shards"] = discovered
-            manifest["base_dir"] = base_dir_guess
-            with open(manifest_file, "w", encoding="utf-8") as fh:
-                json.dump(manifest, fh, indent=2)
-            print(
-                f"Discovered {len(discovered)} monthly shards via Pathway windows; "
-                f"updated manifest at {manifest_file}"
-            )
-        except Exception as exc:  # pragma: no cover - defensive for unexpected Pathway errors
-            print(f"Pathway month discovery failed: {exc}")
-    if not shards:
-        shards = {}
-
-    # Build months primarily from daily_index; merge any month metadata if present
-    shards_list = []
-    last_ft = manifest.get("last_fine_tuned_month")
-    months = {}
-
-    daily_index = manifest.get("daily_index", {})
-    if isinstance(daily_index, dict):
-        for dt in daily_index.keys():
-            try:
-                lbl = datetime.strptime(dt, "%Y-%m-%d").strftime("%Y-%m")
-            except Exception:
-                continue
-            months.setdefault(lbl, []).append(dt)
-
-    if isinstance(shards, dict):
-        for lbl, payload in shards.items():
-            if isinstance(payload, dict) and payload.get("dates"):
-                months.setdefault(lbl, []).extend(payload["dates"])
-
-    for lbl, dates in months.items():
-        dates_sorted = sorted(set(dates))
-        shard = {
-            "month": lbl,
-            "dates": dates_sorted,
-            "month_start": dates_sorted[0],
-            "month_end": dates_sorted[-1],
-            "processed": bool(last_ft == lbl),
-        }
-        shards_list.append(shard)
-
-    if not shards_list:
-        raise ValueError("Manifest does not contain any shards (monthly_shards or daily_index)")
-
-    target_month_label = getattr(args, "fine_tune_month", None)
-    start_month_label = getattr(args, "fine_tune_start_month", None)
-    start_month_dt = None
-    if start_month_label:
-        try:
-            start_month_dt = datetime.strptime(start_month_label, "%Y-%m")
-        except ValueError as exc:
-            raise ValueError("--fine_tune_start_month must follow YYYY-MM format") from exc
-
-    unprocessed = []
-    for idx, shard in enumerate(shards_list):
-        if shard.get("processed", False):
-            continue
-        if shard.get("dates") and not shard.get("month_start"):
-            dates_sorted = sorted(shard["dates"])
-            shard["month_start"] = dates_sorted[0]
-            shard["month_end"] = dates_sorted[-1]
-        try:
-            month_label, month_start, month_end = _infer_month_dates(shard)
-        except ValueError:
-            # Can't infer dates from this shard, skip it
-            continue
-        unprocessed.append((idx, shard, month_label, month_start, month_end))
-
-    if not unprocessed:
-        if target_month_label:
-            raise RuntimeError(f"Target month {target_month_label} was not found or already processed.")
-        raise RuntimeError("No unprocessed monthly shards available for fine-tuning")
-
-    # Pick the most recent month
-    def _month_sort_key(item):
-        _, _, month_label, _, _ = item
-        return datetime.strptime(month_label, "%Y-%m")
-
-    shard_idx, shard, month_label, month_start, month_end = max(unprocessed, key=_month_sort_key)
-
-    base_dir = (
-        manifest.get("base_dir")
-        or f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
-    )
-
+            print(f"Successfully fetched data for month: {fetched_month}")
+        except Exception as e:
+            print(f"Warning: Could not fetch new data: {e}")
+            print("Continuing with existing data...")
+    
     if not os.path.exists(base_dir):
-        raise FileNotFoundError(f"Monthly shard data directory not found: {base_dir}")
-
+        raise FileNotFoundError(f"Data directory not found: {base_dir}")
+    
+    # Scan pkl files and parse dates from filenames
+    pkl_files = [f for f in os.listdir(base_dir) if f.endswith('.pkl')]
+    if not pkl_files:
+        raise ValueError(f"No pkl files found in {base_dir}")
+    
+    # Parse dates from filenames (e.g., "2024-11-29.pkl" -> datetime(2024, 11, 29))
+    dates = []
+    for f in pkl_files:
+        try:
+            date_str = f.replace('.pkl', '')
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            dates.append(dt)
+        except ValueError:
+            continue  # Skip files that don't match date format
+    
+    if not dates:
+        raise ValueError(f"No valid date-named pkl files found in {base_dir}")
+    
+    # Sort dates and find the latest
+    dates.sort()
+    latest_date = dates[-1]
+    
+    # Derive the month to fine-tune (the month of the latest date)
+    month_label = latest_date.strftime("%Y-%m")
+    
+    # Get all dates in this month
+    month_dates = [d for d in dates if d.strftime("%Y-%m") == month_label]
+    month_start = min(month_dates).strftime("%Y-%m-%d")
+    month_end = max(month_dates).strftime("%Y-%m-%d")
+    
+    print(f"Detected latest month: {month_label} ({len(month_dates)} trading days: {month_start} to {month_end})")
+    
+    # Load the monthly dataset
     monthly_dataset = AllGraphDataSampler(
         base_dir=base_dir,
         date=True,
@@ -450,8 +370,7 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     if len(monthly_dataset) == 0:
         raise ValueError(f"Monthly dataset for {month_label} is empty (start={month_start}, end={month_end})")
 
-    # Pad short lookback windows to the configured lookback to avoid stacking errors
-    # when monthly shards (or injected replay samples) have fewer trading days than args.lookback.
+    # Pad short lookback windows to the configured lookback
     target_lookback = getattr(args, "lookback", 30)
 
     def _pad_sample(sample):
@@ -495,21 +414,8 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     args.lookback = getattr(env_ref, "lookback", getattr(args, "lookback", 30))
     args.input_dim = getattr(env_ref, "feat_dim", getattr(args, "input_dim", 6))
 
-    previous_checkpoint = None
-    # Find the strictly previous processed shard's checkpoint
-    for prev_idx in range(shard_idx - 1, -1, -1):
-        prev_shard = shards_list[prev_idx]
-        prev_path = prev_shard.get("checkpoint_path") or prev_shard.get("checkpoint")
-        if prev_shard.get("processed") and prev_path and os.path.exists(prev_path):
-            previous_checkpoint = prev_path
-            break
-
-    manifest_last_ckpt = manifest.get("last_checkpoint_path")
+    # Find checkpoint to fine-tune from
     checkpoint_candidates = [
-        shard.get("checkpoint"),
-        shard.get("checkpoint_path"),
-        previous_checkpoint,
-        manifest_last_ckpt,
         getattr(args, "resume_model_path", None),
         getattr(args, "baseline_checkpoint", None),
     ]
@@ -517,7 +423,7 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     checkpoint_path = next((p for p in checkpoint_candidates if os.path.exists(p)), None)
 
     if checkpoint_path is None:
-        raise FileNotFoundError("No valid base checkpoint found for fine-tuning")
+        raise FileNotFoundError("No valid base checkpoint found for fine-tuning. Provide --resume_model_path or --baseline_checkpoint")
 
     print(f"Fine-tuning {checkpoint_path} on month {month_label} ({month_start} to {month_end}) for {args.fine_tune_steps} timesteps")
 
@@ -572,7 +478,7 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
 
     new_replay_samples = []
     if getattr(args, "ptr_mode", False):
-        # Select high-val   ue samples from the current month to carry forward
+        # Select high-value samples from the current month to carry forward
         new_replay_samples = select_replay_samples(model, env_init, monthly_dataset, k_percent=0.1)
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -581,43 +487,7 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     model.save(out_path)
     print(f"Saved fine-tuned checkpoint to {out_path}")
 
-    # Optional promotion gating (align with base training)
-    gate_summary = None
-    gate_log = None
-    try:
-        # Reuse model_predict to obtain evaluation summary/log on test split for gating
-        gate_result = model_predict(args, model, test_loader, split=f"{month_label}_gate")
-        gate_summary = gate_result.get("summary") if isinstance(gate_result, dict) else None
-        gate_log = gate_result.get("log") if isinstance(gate_result, dict) else None
-    except Exception as exc:
-        print(f"Warning: promotion gating evaluation failed: {exc}")
-
-    try:
-        apply_promotion_gate(args, out_path, gate_summary, gate_log)
-    except Exception as exc:
-        print(f"Warning: promotion gating failed: {exc}")
-
-    # Update manifest bookkeeping
-    shard.update({
-        "processed": True,
-        "checkpoint_path": out_path,
-        "processed_at": datetime.utcnow().isoformat(timespec="seconds"),
-    })
-    if isinstance(shards, dict):
-        # Preserve metadata (processed flag, checkpoint, processed_at) even when manifest stores shards as a mapping
-        manifest["monthly_shards"][month_label] = shard
-    else:
-        manifest["monthly_shards"][shard_idx] = shard
-    manifest["last_fine_tuned_month"] = month_label
-    manifest["last_checkpoint_path"] = out_path
-
-    output_manifest = bookkeeping_path or manifest_file
-
-    out_dir = os.path.dirname(output_manifest)
-    if out_dir and not os.path.exists(out_dir):
-        os.makedirs(out_dir, exist_ok=True)
-    with open(output_manifest, "w", encoding="utf-8") as fh:
-        json.dump(manifest, fh, indent=2)
+    return out_path, new_replay_samples
     print(f"Updated manifest at {output_manifest}")
 
     return out_path, new_replay_samples
