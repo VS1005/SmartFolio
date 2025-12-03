@@ -75,7 +75,6 @@ class AllGraphDataSampler(data.Dataset):
                 print(f"\nWarning: failed to load {self.gnames_all[i]}: {e}. Skipping.")
                 continue
 
-            # Filter out empty or inconsistent items (e.g., 0 stocks)
             try:
                 feats = item.get('features', None)
                 labels = item.get('labels', None)

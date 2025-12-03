@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 from __future__ import annotations
 
 import argparse
@@ -76,7 +74,6 @@ def fit_ridge(Z: np.ndarray, Y: np.ndarray, lam: float) -> Tuple[np.ndarray, np.
     Z = Z.astype(np.float64)
     Y = Y.astype(np.float64)
     
-    # Check for active latents
     z_std = Z.std(axis=0)
     active_mask = z_std > 1e-6
     n_active = active_mask.sum()
@@ -92,7 +89,6 @@ def fit_ridge(Z: np.ndarray, Y: np.ndarray, lam: float) -> Tuple[np.ndarray, np.
     z_std_active = Z_active.std(axis=0, keepdims=True) + 1e-8
     Z_norm = (Z_active - z_mean) / z_std_active
     
-    # Bias trick
     ones = np.ones((Z_norm.shape[0], 1), dtype=np.float64)
     Zb = np.concatenate([Z_norm, ones], axis=1)
     
@@ -107,7 +103,6 @@ def fit_ridge(Z: np.ndarray, Y: np.ndarray, lam: float) -> Tuple[np.ndarray, np.
     
     preds = Zb @ W_active
     
-    # Unpack weights
     W_full = np.zeros((Z.shape[1] + 1, Y.shape[1]), dtype=np.float64)
     active_indices = np.where(active_mask)[0]
     W_full[active_indices, :] = W_active[:-1]
@@ -127,7 +122,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use dataset that provides activations
     dataset = TraceDataset(args.data_path)
     if dataset.logits is None:
         raise ValueError("Dataset does not contain 'logits' for alignment.")
@@ -143,26 +137,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     with torch.no_grad():
         for batch in loader:
             x = batch["input"].to(device)
-            target = batch["logits"] # [batch, 1]
-            
-            # SAE Forward
+            target = batch["logits"] 
             if model_type in ("topk", "jumprelu"):
                 output = model(x)
-                z = output[1] # (recon, latent, info)
+                z = output[1]
             else:
                 output = model(x)
-                z = output[1] # (recon, latent)
+                z = output[1] 
             
             latents.append(z.cpu().numpy())
             targets.append(target.numpy().squeeze(1)) # Flatten to [batch]
 
     Z = np.concatenate(latents, axis=0)
     Y = np.concatenate(targets, axis=0)
-    
-    # Reshape Y if needed. If Y is [steps * num_stocks], alignment is 1D?
-    # Actually, logits are usually per-stock scores. 
-    # If logits are 1D (score per stock), we align latent vector Z (dim=latent_dim) to scalar Y.
-    # So W will be [latent_dim, 1].
     if Y.ndim == 1:
         Y = Y.reshape(-1, 1)
 

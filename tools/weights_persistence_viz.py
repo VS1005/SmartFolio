@@ -1,21 +1,7 @@
-#!/usr/bin/env python3
-"""
-Quick inspection tool for saved allocation CSVs.
-Loads weights_{split}_*.csv produced by trainer/irl_trainer.py, then:
- - Plots per-ticker weight trajectories over steps
- - Computes turnover between consecutive steps to see persistence
- - Prints basic stats (mean, std, min, max) per ticker
-
-Usage:
-    python tools/weights_persistence_viz.py --weights-csv path/to/test_weights_YYYYMMDD_HHMMSS.csv \
-        [--tickers-csv tickers.csv] [--top-k 10] [--plot]
-"""
-
 import argparse
 import os
 from pathlib import Path
 from typing import List
-
 import numpy as np
 import pandas as pd
 
@@ -23,7 +9,6 @@ try:
     import matplotlib.pyplot as plt
 except Exception:
     plt = None
-
 
 def load_tickers(csv_path: str, expected_count: int | None = None) -> List[str]:
     if not csv_path:
@@ -143,14 +128,12 @@ def main():
 
     tickers = load_tickers(args.tickers_csv, expected_count=df["ticker"].nunique() if "ticker" in df else None)
 
-    # Ensure required columns
     required_cols = {"step", "ticker", "weight"}
     if not required_cols.issubset(df.columns):
         raise ValueError(f"Weights CSV missing required columns {required_cols}. Found columns: {df.columns.tolist()}")
 
     summarize(df, args.top_k, tickers)
 
-    # Rank frequency table
     rf = rank_frequency(df, args.top_k)
     if not rf.empty:
         rf_path = weights_path.with_name(weights_path.stem + "_rank_frequency.csv")
@@ -186,7 +169,6 @@ def main():
         print(f"\nCosine similarity w_t vs w_(t-1): mean={cos.mean():.4f}, std={cos.std():.4f}, "
               f"min={cos.min():.4f}, max={cos.max():.4f}")
 
-        # Top-K overlap (Jaccard) per step
         k = min(args.top_k_overlap, matrix.shape[1])
         overlaps = []
         for i in range(matrix.shape[0] - 1):
@@ -204,7 +186,6 @@ def main():
     if args.plot:
         save_path = Path(args.save_plot).expanduser() if args.save_plot else None
         plot(df, tickers_list, args.top_k, save_path)
-
 
 if __name__ == "__main__":
     main()

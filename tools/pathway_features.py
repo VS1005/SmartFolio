@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import pathway as pw
 
-
 def _build_schema(columns: List[str]) -> type:
     cols = {
         "kdcode": pw.column_definition(dtype=str),
@@ -46,7 +45,6 @@ def compute_rolling_mean_std_pathway(
     original_dt_dtype = df_work["dt"].dtype
     df_work["dt"] = pd.to_datetime(df_work["dt"])
 
-    # Keep only required columns in a deterministic order and normalize dtypes
     ordered_cols = ["kdcode", "dt"] + cal_cols
     df_ordered = df_work[ordered_cols].copy()
     for col in cal_cols:
@@ -74,7 +72,6 @@ def compute_rolling_mean_std_pathway(
         table.dt, window=window, instance=table.kdcode, behavior=behavior
     )
 
-    # Build reducers for each column
     reduce_kwargs = {
         "kdcode": pw.this._pw_instance,
         "dt": pw.this._pw_window_end,
@@ -103,7 +100,6 @@ def compute_rolling_mean_std_pathway(
         .merge(pdf, on=["kdcode", "dt"], how="left")
     )
 
-    # Restore dt format if caller passed strings
     if pd.api.types.is_object_dtype(original_dt_dtype):
         merged["dt"] = merged["dt"].dt.strftime("%Y-%m-%d")
     return merged

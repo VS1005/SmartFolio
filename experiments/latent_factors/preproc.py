@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Dict, Tuple
-
 import torch
-
 
 @dataclass
 class PreprocessConfig:

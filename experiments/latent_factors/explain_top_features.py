@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Explain how "top features" are determined in the Sparse Autoencoder
 """
@@ -16,7 +15,7 @@ def main():
         return
     
     decoder_data = np.load(decoder_path)
-    decoder_matrix = decoder_data['decoder_matrix']  # Shape: (input_dim, latent_dim)
+    decoder_matrix = decoder_data['decoder_matrix']  
     
     with open(features_path) as f:
         features_data = json.load(f)
@@ -38,7 +37,6 @@ def main():
     print(f"   Higher absolute weight = stronger influence on reconstruction")
     print(f"   = that input feature is more important for this latent's meaning")
     
-    # Show example for a few latents
     print(f"\n3. EXAMPLE: Top features for 3 latents")
     print("=" * 100)
     
@@ -52,7 +50,6 @@ def main():
         print(f"\n{latent_id.upper()} (column {latent_num} of decoder matrix):")
         print("-" * 100)
         
-        # Get the actual decoder column
         col = decoder_matrix[:, latent_num]
         abs_col = np.abs(col)
         

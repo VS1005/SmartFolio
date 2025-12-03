@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 from __future__ import annotations
 
 import argparse
@@ -10,7 +8,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
-
 import numpy as np
 import torch
 from torch_geometric.loader import DataLoader
@@ -115,8 +112,6 @@ def top_edges(matrix: np.ndarray, k: int = 5) -> List[Tuple[int, int, float]]:
     if flat.size == 0:
         return []
     size = matrix.shape[0]
-    
-    # Create a copy and zero out diagonal (self-loops)
     matrix_no_diag = matrix.copy()
     np.fill_diagonal(matrix_no_diag, 0)
     flat_no_diag = matrix_no_diag.reshape(-1)
@@ -135,13 +130,7 @@ def top_edges(matrix: np.ndarray, k: int = 5) -> List[Tuple[int, int, float]]:
 
 
 def _call_policy_with_attention(policy_net, features_tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor] | None]:
-    """Handle legacy checkpoints that return logits only.
-
-    Some earlier HGAT checkpoints ignore the ``require_weights`` flag and only
-    return logits. We detect this condition and fall back to a ``None``
-    attention payload so the caller can raise a friendly error.
-    """
-
+    
     output = policy_net(features_tensor, require_weights=True)
     if isinstance(output, tuple):
         if len(output) >= 2:

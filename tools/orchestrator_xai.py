@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-"""Unified SmartFolio explainability orchestrator.
-
-This script enforces a single source of truth for a given snapshot date:
-1. Extract the top-K holdings (default five) directly from the monthly holdings log.
-2. Run both attention and tree explainability pipelines on the trailing lookback window
-   (default 60 days ending on the snapshot).
-3. Generate LLM narratives (tree + attention) and persist their prompts/outputs for auditing.
-4. Invoke the TradingAgents WeightSynthesisAgent per ticker, storing markdown and summary bullets.
-5. Fuse trading, tree, and attention context into a final per-stock write-up and save an index
-   describing every artefact.
-"""
 
 from __future__ import annotations
 
@@ -108,7 +96,6 @@ def top_k_for_date_from_log(
 
     raise RuntimeError(f"No holdings found for target date {target_date} in {monthly_log_csv}")
 
-
 def collect_holdings(cfg: OrchestratorConfig) -> List[Holding]:
     print(f"Selecting top {cfg.top_k} holdings for {cfg.date} from {cfg.monthly_log_csv}")
     rows = top_k_for_date_from_log(cfg.monthly_log_csv, cfg.date, top_k=cfg.top_k, run_id=cfg.monthly_run_id)
@@ -122,7 +109,6 @@ def collect_holdings(cfg: OrchestratorConfig) -> List[Holding]:
     ]
     print("Chosen tickers:", [h.ticker for h in holdings])
     return holdings
-
 
 def run_attention_viz_module(cfg: OrchestratorConfig, start_date: str, end_date: str, out_dir: Path) -> Path:
     debug_log = out_dir / "orchestrator_debug.log"
@@ -158,7 +144,6 @@ def run_attention_viz_module(cfg: OrchestratorConfig, start_date: str, end_date:
         f.write("Calling attention_viz_mod.main(argv)...\n")
 
     try:
-        # Force reload to ensure we have the latest version
         import importlib
         import tools.attention_viz
         importlib.reload(tools.attention_viz)
@@ -181,7 +166,6 @@ def run_attention_viz_module(cfg: OrchestratorConfig, start_date: str, end_date:
             traceback.print_exc(file=f)
         (out_dir / "attention_viz_error.txt").write_text(f"Error: {exc}\nArgv: {argv}", encoding="utf-8")
     return out_dir / f"attention_summary_{cfg.market}.json"
-
 
 def run_explain_tree_module(cfg: OrchestratorConfig, start_date: str, end_date: str, out_dir: Path) -> Path:
     print(f"Running explain_tree for {start_date} → {end_date} (lookback {cfg.lookback_days}d)")
@@ -211,7 +195,6 @@ def run_explain_tree_module(cfg: OrchestratorConfig, start_date: str, end_date: 
         "--tickers-csv",
         "tickers.csv",
     ]
-    # Ensure explain_tree respects the orchestrator lookback via an explicit cap
     argv.extend(["--max-steps", str(cfg.lookback_days)])
     if cfg.monthly_run_id:
         argv.extend(["--focus-run-id", cfg.monthly_run_id])
@@ -220,7 +203,6 @@ def run_explain_tree_module(cfg: OrchestratorConfig, start_date: str, end_date: 
     except Exception as exc:  # noqa: BLE001
         print(f"[WARN] explain_tree failed: {exc}")
     return out_dir / f"explain_tree_{cfg.market}.joblib"
-
 
 def generate_tree_narrative(cfg: OrchestratorConfig, snapshot: Path, out_dir: Path) -> Optional[Path]:
     if not snapshot.exists():
@@ -238,10 +220,9 @@ def generate_tree_narrative(cfg: OrchestratorConfig, snapshot: Path, out_dir: Pa
         destination.write_text(text, encoding="utf-8")
         print(f"Saved tree narrative to {destination}")
         return destination
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  
         print(f"[WARN] Tree narrative generation failed: {exc}")
         return None
-
 
 def generate_attention_narrative(cfg: OrchestratorConfig, summary_path: Path, out_dir: Path) -> Optional[Path]:
     if not summary_path.exists():
@@ -259,10 +240,9 @@ def generate_attention_narrative(cfg: OrchestratorConfig, summary_path: Path, ou
         destination.write_text(text, encoding="utf-8")
         print(f"Saved attention narrative to {destination}")
         return destination
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc: 
         print(f"[WARN] Attention narrative generation failed: {exc}")
         return None
-
 
 def run_trading_agents(cfg: OrchestratorConfig, holdings: List[Holding], out_dir: Path) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
@@ -293,7 +273,7 @@ def run_trading_agents(cfg: OrchestratorConfig, holdings: List[Holding], out_dir
                 }
             )
             print(f"Saved trading agent summary for {holding.ticker} → {out_path}")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc: 
             rows.append(
                 {
                     "ticker": holding.ticker,
@@ -319,13 +299,11 @@ def _load_tree_per_stock(snapshot_path: Optional[Path]) -> Dict[str, Dict[str, o
             mapping[str(ticker).upper()] = entry
     return mapping
 
-
 def _load_attention_summary_json(attn_json: Optional[Path]) -> Dict[str, object]:
     if not attn_json or not attn_json.exists():
         return {}
     with attn_json.open("r", encoding="utf-8") as fh:
         return json.load(fh)
-
 
 def _extract_attention_edges(summary: Dict[str, object], ticker: str) -> List[Dict[str, object]]:
     edges: List[Dict[str, object]] = []
@@ -457,10 +435,8 @@ def render_dashboard(
     tree_text: Optional[str],
     attention_text: Optional[str],
 ) -> None:
-    print("\n================= Snapshot Overview =================")
     for rank, holding in enumerate(holdings, start=1):
         print(f"{rank:02d}. {holding.ticker:<8} | weight {holding.weight*100:.2f}% | as_of {holding.as_of or 'n/a'}")
-    print("======================================================\n")
 
     if tree_text:
         print("Tree Narrative (full text saved to disk):")
@@ -472,7 +448,6 @@ def render_dashboard(
     trading_map = {row.get("ticker"): row for row in trading_rows}
     final_map = {row.get("ticker"): row for row in final_reports}
 
-    print("\n================= Per-Stock Recap =================")
     for holding in holdings:
         trade = trading_map.get(holding.ticker)
         final = final_map.get(holding.ticker)
@@ -493,7 +468,6 @@ def render_dashboard(
             print(f"   final synthesis failed: {final.get('error','unknown')}")
         else:
             print("   final synthesis missing")
-    print("====================================================\n")
 
 
 def write_final_markdown(
@@ -659,7 +633,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="explainability_results")
     return parser.parse_args()
 
-
 def main() -> None:
     args = parse_args()
     cfg = OrchestratorConfig(
@@ -676,7 +649,5 @@ def main() -> None:
         monthly_run_id=args.monthly_run_id,
     )
     run_orchestrator(cfg)
-
-
 if __name__ == "__main__":
     main()

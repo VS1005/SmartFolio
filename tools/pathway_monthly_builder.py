@@ -31,19 +31,6 @@ def build_monthly_shards_with_pathway(
     min_days: int = 10,
     cutoff_days: int | None = None,
 ) -> List[Dict[str, object]]:
-    """
-    Build monthly shards via Pathway tumbling windows and update manifest.
-
-    Args:
-        base_dir: directory containing daily *.pkl files (YYYY-MM-DD prefix).
-        manifest_path: path to monthly_manifest.json to update.
-        min_days: minimum files per month to keep shard.
-        cutoff_days: optional temporal cutoff for late data; if provided, older
-                     rows outside the cutoff are ignored (Pathway common_behavior).
-
-    Returns:
-        List of shard dicts written into manifest["monthly_shards"].
-    """
     rows = list(_iter_daily_files(base_dir))
     if not rows:
         raise ValueError(f"No daily pickle files found under {base_dir}")
@@ -104,4 +91,3 @@ def build_monthly_shards_with_pathway(
         json.dump(manifest, fh, indent=2)
 
     return shards
-

@@ -13,7 +13,6 @@ import torch
 print(torch.cuda.is_available())
 from dataloader.data_loader import *
 from policy.policy import *
-# from trainer.trainer import *
 from stable_baselines3 import PPO
 from trainer.irl_trainer import *
 from torch_geometric.loader import DataLoader
@@ -125,7 +124,6 @@ def _resolve_manifest_path(args, manifest_path: str | None) -> Path:
         if candidate.is_file():
             return candidate
         if not candidate.is_absolute():
-            # Try placing the provided filename inside the canonical dataset dir.
             alt = _default_manifest_path(args).with_name(candidate.name)
             if alt.is_file():
                 return alt
@@ -150,7 +148,6 @@ def load_finrag_prior(weights_path, num_stocks, tickers_csv="tickers.csv"):
     with open(weights_path, "r", encoding="utf-8") as fh:
         payload = json.load(fh)
 
-    # Unwrap common container keys
     if isinstance(payload, dict) and ("weights" in payload or "scores" in payload):
         payload = payload.get("weights") or payload.get("scores")
 
@@ -186,10 +183,7 @@ def load_finrag_prior(weights_path, num_stocks, tickers_csv="tickers.csv"):
 
 
 def init_policy_bias_from_prior(model, prior_weights):
-    """
-    Initialize the policy action head bias so the mean action roughly matches the prior.
-    Works for SB3 ActorCriticPolicy subclasses where action_net is a Linear layer.
-    """
+    
     if prior_weights is None:
         return
     policy = getattr(model, "policy", None)
@@ -247,9 +241,7 @@ def _infer_month_dates(shard):
     return month_label, month_start, month_end
 
 def select_replay_samples(model, env, dataset, k_percent=0.3):
-    """
-    Select top k% samples based on absolute reward magnitude (proxy for importance).
-    """
+    
     print("Selecting replay samples...")
     obs = env.reset()
     rewards = []
@@ -268,15 +260,12 @@ def select_replay_samples(model, env, dataset, k_percent=0.3):
         if done:
             break
             
-    # Sort by absolute reward descending
     step_rewards.sort(key=lambda x: x[1], reverse=True)
     
     # Select top k
     num_to_select = int(len(step_rewards) * k_percent)
     selected_indices = [x[0] for x in step_rewards[:num_to_select]]
     
-    # Retrieve data objects from dataset
-    # dataset.data_all is the list
     selected_samples = [dataset.data_all[i] for i in selected_indices if i < len(dataset.data_all)]
     
     print(f"Selected {len(selected_samples)} replay samples from {len(dataset)} total.")
@@ -334,7 +323,6 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
 
     shards = manifest.get("monthly_shards", {})
     print("shards", shards)
-    # If manifest lacks shards, optionally discover them using Pathway temporal.session windowing.
     if (not shards) and getattr(args, "discover_months_with_pathway", False):
         base_dir_guess = manifest.get(
             "base_dir",
@@ -361,7 +349,6 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     if not shards:
         shards = {}
 
-    # Build months primarily from daily_index; merge any month metadata if present
     shards_list = []
     last_ft = manifest.get("last_fine_tuned_month")
     months = {}
@@ -492,7 +479,6 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     env_init = create_env_init(args, data_loader=monthly_loader)
 
     previous_checkpoint = None
-    # Find the strictly previous processed shard's checkpoint
     for prev_idx in range(shard_idx - 1, -1, -1):
         prev_shard = shards_list[prev_idx]
         prev_path = prev_shard.get("checkpoint_path") or prev_shard.get("checkpoint")
@@ -543,7 +529,6 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
             ptr_mode=False,
         )
         prior_policy = prior_model.policy
-        # Load the "current" (trainable new policy)
         model = load_weights_into_new_model(
             checkpoint_path,
             env_init,
@@ -577,14 +562,12 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     model.save(out_path)
     print(f"Saved fine-tuned checkpoint to {out_path}")
 
-    # Update manifest bookkeeping
     shard.update({
         "processed": True,
         "checkpoint_path": out_path,
         "processed_at": datetime.utcnow().isoformat(timespec="seconds"),
     })
     if isinstance(shards, dict):
-        # Preserve metadata (processed flag, checkpoint, processed_at) even when manifest stores shards as a mapping
         manifest["monthly_shards"][month_label] = shard
     else:
         manifest["monthly_shards"][shard_idx] = shard
@@ -620,9 +603,6 @@ def train_predict(args, predict_dt):
                               drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=len(val_dataset), pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), pin_memory=True)
-    # print(len(train_loader), len(val_loader), len(test_loader))
-
-    # create or load model
     env_init = create_env_init(args, dataset=train_dataset)
     if args.policy == 'MLP':
         if getattr(args, 'resume_model_path', None) and os.path.exists(args.resume_model_path):
@@ -635,13 +615,12 @@ def train_predict(args, predict_dt):
                         seed=args.seed,
                         device=args.device)
     elif args.policy == 'HGAT':
-        # Determine lookback from environment or args to ensure consistency
         lookback = getattr(env_init, 'lookback', getattr(args, 'lookback', 30))
         if hasattr(env_init, 'envs'):
              lookback = getattr(env_init.envs[0], 'lookback', lookback)
 
         policy_kwargs = dict(
-            last_layer_dim_pi=args.num_stocks,  # Should equal num_stocks for proper initialization
+            last_layer_dim_pi=args.num_stocks,
             last_layer_dim_vf=args.num_stocks,
             n_head=8,
             hidden_dim=128,
@@ -658,13 +637,11 @@ def train_predict(args, predict_dt):
                         **PPO_PARAMS,
                         seed=args.seed,
                         device=args.device)
-    # Initialize policy bias with FinRAG prior if available
     init_policy_bias_from_prior(model, getattr(args, "finrag_prior", None))
     train_model_and_predict(model, args, train_loader, val_loader, test_loader)
 
     if getattr(args, "ptr_mode", False):
         print("Selecting initial replay samples from pre-training data...")
-        # Recreate the env with the full training set for selection
         env_selection = create_env_init(args, dataset=train_dataset)
         model.set_env(env_selection)
         
@@ -773,8 +750,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     args.market = 'custom'
-
-    # Handle aliases and config
     if getattr(args, "use_ptr", False):
         args.ptr_mode = True
 
@@ -785,13 +760,11 @@ if __name__ == '__main__':
         PPO_PARAMS["tensorboard_log"] = None
         print("TensorBoard logging disabled (--disable-tensorboard); PPO will not attempt to import tensorboard.")
 
-    # Default training range (override via CLI if desired)
     args.device = "cuda:0" if torch.cuda.is_available() else "cpu"
     args.model_name = 'SmartFolio'
     args.relation_type = getattr(args, "relation_type", "hy") or "hy"
     args.seed = 123
 
-    # Auto-detect input_dim (number of per-stock features) from a sample file
     try:
         data_dir_detect = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
         sample_files_detect = [f for f in os.listdir(data_dir_detect) if f.endswith('.pkl')]
@@ -803,11 +776,9 @@ if __name__ == '__main__':
             # Expect features shaped [T, num_stocks, input_dim]
             feats = sample_data_detect.get('features')
             if feats is not None:
-                # Handle both torch tensors and numpy arrays
                 try:
                     shape = feats.shape
                 except Exception:
-                    # If it's a torch tensor wrapped differently
                     try:
                         shape = feats.size()
                     except Exception:
@@ -832,10 +803,8 @@ if __name__ == '__main__':
     args.pos_yn = True
     args.neg_yn = True
     args.multi_reward = True
-    # Training hyperparameters (can be overridden via command line)
     args.irl_epochs = getattr(args, 'irl_epochs', 50)
     args.rl_timesteps = getattr(args, 'rl_timesteps', 10000)
-    # Risk-adaptive reward parameters
     args.risk_score = getattr(args, 'risk_score', 0.5)
     args.dd_base_weight = getattr(args, 'dd_base_weight', 1.0)
     args.dd_risk_factor = getattr(args, 'dd_risk_factor', 1.0)
@@ -845,10 +814,8 @@ if __name__ == '__main__':
             "dataset_default",
             "expert_cache"
         )
-    # ensure save dir
     os.makedirs(args.save_dir, exist_ok=True)
 
-    # Auto-detect num_stocks from a sample pickle file
     data_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
     sample_files = [f for f in os.listdir(data_dir) if f.endswith('.pkl')]
     if sample_files:
@@ -862,12 +829,11 @@ if __name__ == '__main__':
     else:
         raise ValueError(f"No pickle files found in {data_dir} to determine num_stocks")
 
-    # Load FinRAG prior (if provided) once we know num_stocks
     args.finrag_prior = load_finrag_prior(args.finrag_weights_path, args.num_stocks)
 
     print("market:", args.market, "num_stocks:", args.num_stocks)
     if args.run_monthly_fine_tune:
-        manifest_path = args.manifest or None  # will resolve default inside fine_tune_month
+        manifest_path = args.manifest or None  
         replay_buffer = []
         
         # Load initial buffer if available
@@ -879,31 +845,24 @@ if __name__ == '__main__':
             
         while True:
             try:
-                # Call fine_tune_month (returns path AND new samples)
                 checkpoint, new_samples = fine_tune_month(args, manifest_path=manifest_path, replay_buffer=replay_buffer)
                 print(f"Monthly fine-tuning complete. Checkpoint: {checkpoint}")
                 
-                # Update replay buffer with new samples
                 if new_samples:
                     replay_buffer.extend(new_samples)
                     max_buffer = getattr(args, "ptr_memory_size", 500)
                     if len(replay_buffer) > max_buffer:
-                        # Keep the most recent ones
                         replay_buffer = replay_buffer[-max_buffer:]
                     print(f"Replay buffer updated. Current size: {len(replay_buffer)}")
                     with open(buffer_path, "wb") as f:
                         pickle.dump(replay_buffer, f)
                     print(f"Persisted replay buffer to {buffer_path}")
                 
-                # Update resume_model_path so the next iteration picks up this model
                 args.resume_model_path = checkpoint
-
-                # Exit if user requested only a single specific month
                 if getattr(args, "fine_tune_month", None):
                     print("Requested single-month fine-tune complete; exiting loop.")
                     break
             except RuntimeError as e:
-                # Stop when no more months are left
                 if "No unprocessed monthly shards" in str(e):
                     print("All months processed.")
                     break
@@ -918,8 +877,6 @@ if __name__ == '__main__':
         try:
             ts = time.strftime('%Y%m%d_%H%M%S')
             out_path = os.path.join(args.save_dir, f"ppo_{args.policy.lower()}_{args.market}_{ts}")
-            # train_predict currently returns None; saving env-attached model is handled inside trainer
-            # If we had a handle, we could save here. Keep path ready for future.
             print(f"Training run complete. To save PPO model, call model.save('{out_path}') where model is your PPO instance.")
         except Exception as e:
             print(f"Skip saving PPO model here: {e}")

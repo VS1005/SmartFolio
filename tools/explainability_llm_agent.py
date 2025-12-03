@@ -1,17 +1,3 @@
-#!/usr/bin/env python
-"""
-Explainability narrative generator for SmartFolio.
-
-Optimized for Gemini 2.0 Flash:
-- Plain English "Storyteller" mode
-- Removes technical jargon and numeric thresholds
-- Focuses on "Why" and "What to watch"
-
-Usage:
-  export GOOGLE_API_KEY="YOUR_KEY"
-  python tools/explainability_llm_agent.py --llm --print
-"""
-
 from __future__ import annotations
 import argparse, json, os, sys, time
 from dataclasses import dataclass
@@ -21,10 +7,6 @@ import numpy as np
 import joblib
 import google.generativeai as genai
 
-
-# ---------------------------
-# CORE CONFIG
-# ---------------------------
 SYSTEM_PROMPT = ("""
 You are a Financial Analyst writing a simplified newsletter for retail investors. Your goal is to explain an AI's trading strategy in plain English, removing all technical jargon.
 
@@ -69,10 +51,6 @@ class SnapshotContext:
     metadata: Dict[str, str]
     filtered_data: Dict[str, object]
 
-
-# ---------------------------
-# CLI
-# ---------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate SmartFolio explainability narrative (Gemini 2.0 Flash).")
     p.add_argument("--snapshot", default="explainability_results/explain_tree_custom.joblib")
@@ -82,10 +60,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--print", action="store_true")
     return p.parse_args()
 
-
-# ---------------------------
-# SAFE CONVERSIONS
-# ---------------------------
 def safe_convert(obj):
     if isinstance(obj, (np.integer,)):
         return int(obj)
@@ -106,10 +80,6 @@ def convert_keys_to_str(obj):
     else:
         return safe_convert(obj)
 
-
-# ---------------------------
-# LOAD SNAPSHOT
-# ---------------------------
 def load_snapshot(path: Path) -> SnapshotContext:
     if not path.exists():
         raise FileNotFoundError(f"Snapshot not found: {path}")
@@ -117,18 +87,12 @@ def load_snapshot(path: Path) -> SnapshotContext:
     if not isinstance(data, dict):
         raise TypeError("Joblib file must contain a dict.")
 
-    # We keep avg_weights in the load for potential future use, 
-    # but the prompt instructions explicitly forbid listing it.
     keep = ["per_stock", "avg_weights", "top_indices", "global_r2", "X_shape", "Y_shape"]
     filtered = {k: data.get(k) for k in keep if k in data}
 
     meta = {"model_path": str(path), "included_keys": list(filtered.keys())}
     return SnapshotContext(metadata=meta, filtered_data=filtered)
 
-
-# ---------------------------
-# PROMPT ENGINEERING
-# ---------------------------
 def assemble_prompt(ctx: SnapshotContext) -> str:
     """
     Builds a structured Gemini-optimized prompt emphasizing narrative over data.
@@ -162,10 +126,6 @@ def assemble_prompt(ctx: SnapshotContext) -> str:
 
     return json.dumps(convert_keys_to_str(payload), indent=2, default=safe_convert)
 
-
-# ---------------------------
-# GEMINI CALL (with retry)
-# ---------------------------
 def llm_narrative(prompt: str, model="gemini-2.0-flash", retries=3, delay=4) -> str:
     key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not key:
@@ -191,10 +151,6 @@ def llm_narrative(prompt: str, model="gemini-2.0-flash", retries=3, delay=4) -> 
             return f"**LLM generation failed:** {e}"
     return "**LLM generation unavailable.**"
 
-
-# ---------------------------
-# FALLBACK
-# ---------------------------
 def fallback_narrative(ctx: SnapshotContext) -> str:
     d = ctx.filtered_data
     return (
@@ -203,10 +159,6 @@ def fallback_narrative(ctx: SnapshotContext) -> str:
         "Detailed logic requires LLM generation."
     )
 
-
-# ---------------------------
-# MAIN
-# ---------------------------
 def main() -> None:
     args = parse_args()
     snap = Path(args.snapshot).expanduser()
@@ -234,8 +186,7 @@ def main() -> None:
     if args.print:
         print("\n--- Generated Narrative ---\n")
         print(output_text)
-        print("\n---------------------------")
-    print(f"✅ Narrative written to {out_path}")
+    print(f"Narrative written to {out_path}")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Extract Top Latent Features - Clean Output
 Shows which stock features are most important, balanced across tickers
@@ -22,7 +21,6 @@ def parse_args():
 def main():
     args = parse_args()
     
-    # Load data
     with open(args.features_file) as f:
         features_data = json.load(f)
     with open(args.alignment_file) as f:
@@ -45,8 +43,7 @@ def main():
         latent_num = int(latent_id.replace('latent_', ''))
         names = info.get('feature_names', [])
         weights = info.get('weights', [])
-        
-        # Iterate over all reported features for this latent (do not limit to top-5)
+    
         for name, weight in zip(names, weights):
             if abs(weight) < args.min_weight:
                 continue
@@ -70,14 +67,12 @@ def main():
                 all_features.append(entry)
                 ticker_features[ticker].append(entry)
     
-    # Collect features up to max-per-ticker limit
     balanced_features = []
     ticker_counts = defaultdict(int)
     
     # Sort all features by weight first
     all_features.sort(key=lambda x: x['weight'], reverse=True)
     
-    # Select features, limiting per ticker
     for feat in all_features:
         if ticker_counts[feat['ticker']] < args.max_per_ticker:
             balanced_features.append(feat)
@@ -93,7 +88,6 @@ def main():
         print(f"{i:<6} {feat['ticker']:<15} {feat['feature']:<12} {feat['lag']:<12} "
               f"{feat['weight']:<10.4f} {feat['latent']:<8}")
     
-    # Ticker distribution
     print(f"\n\nTICKER DISTRIBUTION:")
     print("=" * 100)
     ticker_counts = defaultdict(int)
@@ -106,7 +100,6 @@ def main():
     print(f"\nTotal Unique Tickers: {len(ticker_counts)}")
     print("=" * 100)
     
-    # Save
     output = {
         'model_r2': alignment_data.get('r2_mean', 0),
         'total_features': len(balanced_features),

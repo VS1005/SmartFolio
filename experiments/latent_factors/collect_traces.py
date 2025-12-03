@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 from __future__ import annotations
 
 import argparse
@@ -183,11 +181,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     print("Loading PPO model …")
     model = PPO.load(str(model_path), env=None, device=args.device)
     device = torch.device(args.device)
-
-    # --- SETUP FORWARD HOOK TO CAPTURE ACTIVATIONS ---
-    # We want to capture the embedding right before the final linear head.
-    # In TemporalHGAT (model.py), this is the output of 'self.pn' (PairNorm) 
-    # or 'self.sem_gat' (Fusion). 'self.pn' is the best target as it feeds self.output_head.
     captured_activations = {}
     
     def get_activation(name):
@@ -196,8 +189,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             captured_activations[name] = output.detach()
         return hook
 
-    # Navigate to the underlying policy network
-    # PPO.policy -> HGATActorCriticPolicy.mlp_extractor -> HGATNetwork.policy_net -> TemporalHGAT
     policy_net = model.policy.mlp_extractor.policy_net
     if hasattr(policy_net, "pn"):
         hook_handle = policy_net.pn.register_forward_hook(get_activation("embedding"))
@@ -206,9 +197,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         print("Warning: Could not find 'pn' layer in policy_net. Activations will not be collected.")
         hook_handle = None
 
-    # Storage
     obs_buffer: List[np.ndarray] = []
-    activations_buffer: List[np.ndarray] = []  # NEW: Store internal embeddings
+    activations_buffer: List[np.ndarray] = []  
     logits_buffer: List[np.ndarray] = []
     actions_buffer: List[np.ndarray] = []
     rewards_buffer: List[float] = []
@@ -250,7 +240,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         for step in range(int(step_limit)):
             obs_tensor, _ = model.policy.obs_to_tensor(obs)
             
-            # This block runs the policy network to get attention weights AND triggers the hook
             with torch.no_grad():
                 features_tensor = model.policy.extract_features(obs_tensor.to(device))
                 logits, attn = _call_policy_with_attention(model.policy.mlp_extractor.policy_net, features_tensor)
@@ -281,7 +270,6 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         vec_env.close()
     
-    # Remove hook
     if hook_handle:
         hook_handle.remove()
 
@@ -294,7 +282,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     payload = {
         "obs": obs_arr,
-        "activations": activations_arr, # NEW
+        "activations": activations_arr,
         "logits": logits_arr,
         "actions": actions_arr,
         "rewards": rewards_arr,

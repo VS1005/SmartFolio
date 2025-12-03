@@ -2,7 +2,6 @@ import pandas as pd
 import pathway as pw
 from pathway.stdlib.temporal import Direction
 
-
 def asof_align_macro(
     df: pd.DataFrame,
     macro_df: pd.DataFrame,
@@ -72,4 +71,3 @@ def asof_align_macro(
         pdf["dt"] = pdf["dt"].dt.strftime("%Y-%m-%d")
 
     return pdf
-
