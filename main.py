@@ -457,7 +457,7 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
         lookback=lookback,
     )
 
-    if getattr(args, "ptr_mode", False):
+    if getattr(args, "ptr_mode", True):
         print(f"Using PTR (Policy Transfer via Regularization) with coef={args.ptr_coef}")
         # Load the "prior" (frozen old policy)
         prior_model = load_weights_into_new_model(
@@ -700,8 +700,9 @@ if __name__ == '__main__':
 
     # PTR (Policy Transfer Regularization) parameters
     parser.add_argument("--ptr_mode", action="store_true", help="Enable Policy Transfer via Regularization (PTR) for continual learning")
-    parser.add_argument("--ptr_coef", type=float, default=0.1, help="Coefficient for PTR loss (KL divergence penalty)")
-    parser.add_argument("--use_ptr", action="store_true", help="Backward-compatible alias for --ptr_mode")
+    parser.set_defaults(ptr_mode=True)
+    parser.add_argument("--ptr_coef", type=float, default=0.3, help="Coefficient for PTR loss (KL divergence penalty)")
+    parser.add_argument("--use_ptr", action="store_true", default=True, help="Backward-compatible alias for --ptr_mode")
     parser.add_argument("--ptr_memory_size", type=int, default=1000, help="Maximum number of samples retained in the PTR replay buffer")
     parser.add_argument("--ptr_priority_type", type=str, default="max", help="Replay buffer priority aggregation strategy")
 
