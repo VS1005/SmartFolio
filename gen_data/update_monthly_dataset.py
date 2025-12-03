@@ -51,6 +51,7 @@ except ImportError:
         FEATURE_COLS_NORM,
         cal_rolling_mean_std,
         fetch_ohlcv_yf,
+        fetch_ohlcv_streaming_csv,
         filter_code,
         gen_mats_by_threshold,
         get_label,
@@ -273,6 +274,7 @@ def fetch_latest_month_data(
     lookback: int = 20,
     threshold: float = 0.5,
     norm: bool = True,
+    stream: Optional[object] = None,
 ) -> str:
     """
     Fetch the latest month's data from yfinance and build pkl files.
@@ -320,10 +322,12 @@ def fetch_latest_month_data(
     
     # Fetch from yfinance
     print(f"Downloading OHLCV for {len(tickers)} tickers...")
-    try:
+    if stream is not None:
+        mounth_tag = (next_start+timedelta(days=2)).strftime('%Y-%m')
+        mounth_csv_path = f'streaming/consumer/data/{mounth_tag}.csv'
+        df_raw = fetch_ohlcv_streaming_csv(tickers, month_csv_path=mounth_csv_path, lock=stream)
+    else:
         df_raw = fetch_ohlcv_yf(tickers, fetch_start, fetch_end)
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch data from yfinance: {e}")
     
     if df_raw.empty:
         raise ValueError("No data returned from yfinance")

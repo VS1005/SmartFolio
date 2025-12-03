@@ -313,7 +313,7 @@ class StockPortfolioEnv(gym.Env):
             cr = arr / abs(mdd) if mdd != 0 else 0
 
             metrics.update(arr=arr, avol=avol, sharpe=sharpe, mdd=mdd, cr=cr)
-
+            
             if self.benchmark_return is not None and len(self.benchmark_return) == len(df_daily_return):
                 ex_return = df_daily_return["daily_return"] - self.benchmark_return.reset_index(drop=True)
                 if ex_return.std() != 0:

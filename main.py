@@ -30,6 +30,20 @@ from trainer.ptr_ppo import PTR_PPO
 
 PATH_DATA = f'./dataset_default/'
 
+
+def get_risk_score_dir(base_dir: str, risk_score: float) -> str:
+    """Get the checkpoint directory for a specific risk score.
+    
+    Examples:
+        base_dir='checkpoints', risk_score=0.5 -> 'checkpoints_risk05'
+        base_dir='./checkpoints', risk_score=0.1 -> './checkpoints_risk01'
+    """
+    # Convert risk score to tag (0.5 -> '05', 0.1 -> '01')
+    risk_tag = str(risk_score).replace('.', '')
+    # Append risk tag to directory name
+    return f"{base_dir.rstrip('/')}_risk{risk_tag}"
+
+
 def _copy_compatible_policy_weights(policy_module, loaded_state, checkpoint_path):
     """Load only the tensors that match by key and shape to avoid shape-mismatch crashes."""
     if not loaded_state:
@@ -482,11 +496,21 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
         # Select high-value samples from the current month to carry forward
         new_replay_samples = select_replay_samples(model, env_init, monthly_dataset, k_percent=0.1)
 
+    # save_dir already includes risk score (e.g., checkpoints_risk05/)
     os.makedirs(args.save_dir, exist_ok=True)
     month_slug = month_label.replace("/", "-")
     out_path = os.path.join(args.save_dir, f"{args.model_name}_{month_slug}.zip")
     model.save(out_path)
     print(f"Saved fine-tuned checkpoint to {out_path}")
+
+    # Evaluate the fine-tuned model on the monthly data for promotion decision
+    print(f"Evaluating fine-tuned model for promotion gate...")
+    
+    # Temporarily set test dates to the month's date range for model_predict
+    original_test_start = getattr(args, 'test_start_date', None)
+    original_test_end = getattr(args, 'test_end_date', None)
+    args.test_start_date = month_start
+    args.test_end_date = month_end
 
     # Evaluate the fine-tuned model on the monthly data for promotion decision
     print(f"Evaluating fine-tuned model for promotion gate...")
@@ -581,6 +605,7 @@ def train_predict(args, predict_dt):
     init_policy_bias_from_prior(model, getattr(args, "finrag_prior", None))
     train_model_and_predict(model, args, train_loader, val_loader, test_loader)
 
+    # save_dir already includes risk score (e.g., checkpoints_risk05/)
     if getattr(args, "ptr_mode", False):
         print("Selecting initial replay samples from pre-training data...")
         # Recreate the env with the full training set for selection
@@ -606,11 +631,10 @@ def train_predict(args, predict_dt):
         model.save(checkpoint_path)
         print(f"Saved pre-training checkpoint to {checkpoint_path}")
 
-        baseline_path = getattr(args, "baseline_checkpoint", None)
-        if baseline_path:
-            os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
-            shutil.copy2(checkpoint_path, baseline_path)
-            print(f"Updated baseline checkpoint at {baseline_path}")
+        # Copy to baseline.zip in the same risk-score directory
+        baseline_path = os.path.join(args.save_dir, "baseline.zip")
+        shutil.copy2(checkpoint_path, baseline_path)
+        print(f"Updated baseline checkpoint at {baseline_path}")
     except Exception as exc:
         print(f"Failed to save pre-training checkpoint: {exc}")
 
@@ -784,16 +808,31 @@ if __name__ == '__main__':
     # Load FinRAG prior (if provided) once we know num_stocks
     args.finrag_prior = load_finrag_prior(args.finrag_weights_path, args.num_stocks)
 
+    # Modify save_dir to include risk score (e.g., checkpoints -> checkpoints_risk05)
+    risk_score = getattr(args, "risk_score", 0.5)
+    args.save_dir = get_risk_score_dir(args.save_dir, risk_score)
+    os.makedirs(args.save_dir, exist_ok=True)
+    
+    # Set baseline checkpoint path (now just baseline.zip in the risk-score directory)
+    args.baseline_checkpoint = os.path.join(args.save_dir, "baseline.zip")
+    print(f"Using risk score: {risk_score} -> save_dir: {args.save_dir}")
+
     print("market:", args.market, "num_stocks:", args.num_stocks)
     if args.run_monthly_fine_tune:
         replay_buffer = []
         
-        # Load initial buffer if available
+        # Load initial buffer if available (in the risk-score directory)
         buffer_path = os.path.join(args.save_dir, f"replay_buffer_{args.market}.pkl")
         if os.path.exists(buffer_path):
             with open(buffer_path, "rb") as f:
                 replay_buffer = pickle.load(f)
-            print(f"Loaded initial replay buffer with {len(replay_buffer)} samples.")
+            print(f"Loaded initial replay buffer with {len(replay_buffer)} samples from {buffer_path}")
+        
+        # Use risk-score-based baseline as resume path if no explicit resume path provided
+        if not getattr(args, "resume_model_path", None) or not os.path.exists(args.resume_model_path):
+            if os.path.exists(args.baseline_checkpoint):
+                args.resume_model_path = args.baseline_checkpoint
+                print(f"Using baseline checkpoint as resume path: {args.resume_model_path}")
         
         # Call fine_tune_month once (fetches latest month and fine-tunes)
         checkpoint, new_samples = fine_tune_month(args, replay_buffer=replay_buffer)

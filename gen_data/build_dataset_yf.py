@@ -83,6 +83,61 @@ def fetch_ohlcv_yf(tickers: List[str], start: str, end: str) -> pd.DataFrame:
     return tall
 
 
+def fetch_ohlcv_streaming_csv(
+    tickers: Optional[List[str]] = None,
+    month_csv_path: Optional[str] = None,
+    lock=None,
+) -> pd.DataFrame:
+    """Load OHLCV from a pre-flushed monthly CSV produced by streaming.
+
+    Normalizes columns to match fetch_ohlcv_yf output and applies the streaming CSV lock if available.
+    Filters out tickers not in the provided tickers list.
+    """
+    # Try to acquire the shared streaming CSV lock if not provided
+    if lock is None:
+        try:
+            from streaming.shared.locks import StreamingLocks  # type: ignore
+
+            lock = StreamingLocks().csv_write_lock
+        except Exception:
+            lock = None
+
+    if month_csv_path is None:
+        raise ValueError("month_csv_path is required for fetch_ohlcv_streaming_csv")
+
+    ctx = lock if hasattr(lock, "__enter__") else None
+    if ctx:
+        ctx.__enter__()
+    try:
+        df = pd.read_csv(month_csv_path)
+    finally:
+        if ctx:
+            ctx.__exit__(None, None, None)
+
+    if df.empty:
+        return df
+
+    df.columns = [c.lower() for c in df.columns]
+    required = {"kdcode", "dt", "open", "high", "low", "close", "volume"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in streamed CSV {month_csv_path}: {missing}")
+
+    # Filter out tickers that are not in the provided tickers list (if provided)
+    if tickers:
+        df = df[df["kdcode"].isin(tickers)]
+
+    df["dt"] = pd.to_datetime(df["dt"]).dt.strftime("%Y-%m-%d")
+    df = df.sort_values(["kdcode", "dt"]).reset_index(drop=True)
+
+    if "prev_close" not in df.columns:
+        df["prev_close"] = df.groupby("kdcode")["close"].shift(1)
+    df = df.dropna(subset=["prev_close"])
+
+    df = df[["kdcode", "dt", "close", "open", "high", "low", "prev_close", "volume"]]
+    return df
+
+
 def get_label(df: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
     df = df.copy()
     df.set_index("kdcode", inplace=True)
