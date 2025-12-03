@@ -5,6 +5,7 @@ from gymnasium import spaces
 import torch
 import torch as th
 import torch.nn as nn
+import os
 from stable_baselines3.common.policies import ActorCriticPolicy
 
 from model.model import TemporalHGAT
@@ -50,6 +51,12 @@ class HGATNetwork(nn.Module):
                 f"num_stocks*lookback={self.num_stocks * self.lookback}"
             )
         self.n_features = remaining_minus_prev // (self.num_stocks * self.lookback)
+        if os.environ.get("DEBUG_MODEL_SHAPES"):
+            expected_len = 3 * self.num_stocks * self.num_stocks + self.num_stocks * self.lookback * self.n_features + self.num_stocks
+            print(
+                f"[ModelDebug] feature_dim={feature_dim} num_stocks={self.num_stocks} "
+                f"lookback={self.lookback} n_features={self.n_features} expected_obs_len={expected_len}"
+            )
         if self.n_features <= 0:
             raise ValueError(f"Invalid derived n_features={self.n_features}")
 

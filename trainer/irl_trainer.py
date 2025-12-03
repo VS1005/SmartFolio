@@ -293,10 +293,16 @@ PPO_PARAMS = {
 
 
 def model_predict(args, model, test_loader, split: str = "test"):
-    df_benchmark = pd.read_csv(f"./dataset_default/index_data/{args.market}_index.csv")
-    df_benchmark = df_benchmark[(df_benchmark['datetime'] >= args.test_start_date) &
-                                (df_benchmark['datetime'] <= args.test_end_date)]
-    benchmark_return = df_benchmark['daily_return']
+    # Load benchmark data
+    benchmark_return = None
+    try:
+        df_benchmark = pd.read_csv(f"./dataset_default/index_data/{args.market}_index.csv")
+        df_benchmark = df_benchmark[(df_benchmark['datetime'] >= args.test_start_date) &
+                                    (df_benchmark['datetime'] <= args.test_end_date)]
+        benchmark_return = df_benchmark['daily_return'].reset_index(drop=True)
+        print(f"[model_predict] Loaded benchmark with {len(benchmark_return)} dates for range {args.test_start_date} to {args.test_end_date}")
+    except Exception as e:
+        print(f"[model_predict] Warning: Could not load benchmark: {e}")
 
     ticker_map = get_ticker_mapping_for_period(
         args.market,
@@ -311,6 +317,7 @@ def model_predict(args, model, test_loader, split: str = "test"):
 
     for batch_idx, data in enumerate(test_loader):
         corr, ts_features, features, ind, pos, neg, labels, pyg_data, mask = process_data(data, device=args.device)
+        
         env_test = StockPortfolioEnv(
             args=args,
             corr=corr,
@@ -520,6 +527,7 @@ def train_model_and_predict(model, args, train_loader, val_loader, test_loader):
         save_dir = getattr(args, 'save_dir', './checkpoints')
         os.makedirs(save_dir, exist_ok=True)
         ts = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        # save_dir already includes risk score (e.g., checkpoints_risk05/)
         ckpt_path = os.path.join(save_dir, f"reward_net_{args.market}_{ts}.pt")
         torch.save(reward_net.state_dict(), ckpt_path)
         print(f"Saved reward network to {ckpt_path}")
@@ -535,6 +543,7 @@ def train_model_and_predict(model, args, train_loader, val_loader, test_loader):
         os.makedirs(save_dir, exist_ok=True)
         ts = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
         policy_name = getattr(args, 'policy', 'policy').lower()
+        # save_dir already includes risk score (e.g., checkpoints_risk05/)
         candidate_path = os.path.join(save_dir, f"ppo_{policy_name}_{args.market}_{ts}.zip")
         model.save(candidate_path)
         print(f"Saved PPO model checkpoint to {candidate_path}")

@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.nn.parameter import Parameter
 from torch.nn.modules.module import Module
 import math
+import os
 
 
 class Transpose(nn.Module):
@@ -181,6 +182,11 @@ class TemporalHGAT(nn.Module):
                 f"TemporalHGAT expected obs length {expected_len} (num_stocks={self.num_stocks}, "
                 f"lookback={self.lookback}, input_dim={self.input_dim}, ts_size={ts_size}, "
                 f"prev_weights={self.num_stocks}) but got {inputs.shape[1]}"
+            )
+        if os.environ.get("DEBUG_MODEL_SHAPES"):
+            print(
+                f"[ModelDebug] forward: num_stocks={self.num_stocks} lookback={self.lookback} "
+                f"input_dim={self.input_dim} adj_size={adj_size} ts_size={ts_size} obs_len={inputs.shape[1]}"
             )
 
         ptr = 0

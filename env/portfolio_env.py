@@ -1,6 +1,7 @@
 import gym
 import pandas as pd
 import torch
+import os
 from gym import spaces
 import numpy as np
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -82,6 +83,12 @@ class StockPortfolioEnv(gym.Env):
 
         # Previous weights (action inertia)
         obs_len += self.num_stocks
+
+        if os.environ.get("DEBUG_MODEL_SHAPES"):
+            print(
+                f"[EnvDebug] num_stocks={self.num_stocks} lookback={self.lookback} "
+                f"feat_dim={self.feat_dim} obs_len={obs_len} ts_shape={self.ts_features_tensor.shape}"
+            )
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -306,7 +313,7 @@ class StockPortfolioEnv(gym.Env):
             cr = arr / abs(mdd) if mdd != 0 else 0
 
             metrics.update(arr=arr, avol=avol, sharpe=sharpe, mdd=mdd, cr=cr)
-
+            
             if self.benchmark_return is not None and len(self.benchmark_return) == len(df_daily_return):
                 ex_return = df_daily_return["daily_return"] - self.benchmark_return.reset_index(drop=True)
                 if ex_return.std() != 0:

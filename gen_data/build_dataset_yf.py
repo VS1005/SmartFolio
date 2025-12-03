@@ -83,6 +83,61 @@ def fetch_ohlcv_yf(tickers: List[str], start: str, end: str) -> pd.DataFrame:
     return tall
 
 
+def fetch_ohlcv_streaming_csv(
+    tickers: Optional[List[str]] = None,
+    month_csv_path: Optional[str] = None,
+    lock=None,
+) -> pd.DataFrame:
+    """Load OHLCV from a pre-flushed monthly CSV produced by streaming.
+
+    Normalizes columns to match fetch_ohlcv_yf output and applies the streaming CSV lock if available.
+    Filters out tickers not in the provided tickers list.
+    """
+    # Try to acquire the shared streaming CSV lock if not provided
+    if lock is None:
+        try:
+            from streaming.shared.locks import StreamingLocks  # type: ignore
+
+            lock = StreamingLocks().csv_write_lock
+        except Exception:
+            lock = None
+
+    if month_csv_path is None:
+        raise ValueError("month_csv_path is required for fetch_ohlcv_streaming_csv")
+
+    ctx = lock if hasattr(lock, "__enter__") else None
+    if ctx:
+        ctx.__enter__()
+    try:
+        df = pd.read_csv(month_csv_path)
+    finally:
+        if ctx:
+            ctx.__exit__(None, None, None)
+
+    if df.empty:
+        return df
+
+    df.columns = [c.lower() for c in df.columns]
+    required = {"kdcode", "dt", "open", "high", "low", "close", "volume"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in streamed CSV {month_csv_path}: {missing}")
+
+    # Filter out tickers that are not in the provided tickers list (if provided)
+    if tickers:
+        df = df[df["kdcode"].isin(tickers)]
+
+    df["dt"] = pd.to_datetime(df["dt"]).dt.strftime("%Y-%m-%d")
+    df = df.sort_values(["kdcode", "dt"]).reset_index(drop=True)
+
+    if "prev_close" not in df.columns:
+        df["prev_close"] = df.groupby("kdcode")["close"].shift(1)
+    df = df.dropna(subset=["prev_close"])
+
+    df = df[["kdcode", "dt", "close", "open", "high", "low", "prev_close", "volume"]]
+    return df
+
+
 def get_label(df: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
     df = df.copy()
     df.set_index("kdcode", inplace=True)
@@ -137,7 +192,26 @@ def group_and_norm(df: pd.DataFrame, base_cols: List[str], n_clusters: int) -> p
         cluster_features = group[base_cols].fillna(0)
         scaler = StandardScaler()
         features_scaled = scaler.fit_transform(cluster_features)
-        group["cluster"] = kmeans.fit_predict(features_scaled)
+        
+        # Handle case where n_samples < n_clusters
+        n_samples = len(group)
+        effective_clusters = min(n_clusters, n_samples)
+        
+        if effective_clusters < 2:
+            # If only 1 sample, can't cluster - just z-score to 0
+            for f in FEATURE_COLS:
+                group[f"{f}_normalized"] = 0.0
+            group["cluster"] = 0
+            result.append(group)
+            continue
+        
+        # Use adjusted number of clusters
+        if effective_clusters < n_clusters:
+            kmeans_adj = KMeans(n_clusters=effective_clusters, random_state=42)
+            group["cluster"] = kmeans_adj.fit_predict(features_scaled)
+        else:
+            group["cluster"] = kmeans.fit_predict(features_scaled)
+        
         # Merge tiny clusters into nearest
         group_sizes = group["cluster"].value_counts()
         small_clusters = group_sizes[group_sizes < 2].index
@@ -290,7 +364,7 @@ def save_daily_graph(dt: str,
                      market: str,
                      horizon: int,
                      relation_type: str,
-                     lookback: int = 20,
+                     lookback: int = 30,
                      threshold: float = 0.5,
                      norm: bool = True,
                      industry_mat: Optional[np.ndarray] = None):
@@ -422,7 +496,7 @@ def main():
     parser.add_argument("--end", required=True, help="End date YYYY-MM-DD")
     parser.add_argument("--horizon", type=int, default=1)
     parser.add_argument("--relation_type", default="hy")
-    parser.add_argument("--lookback", type=int, default=20)
+    parser.add_argument("--lookback", type=int, default=30)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--norm", dest="norm", action="store_true", help="Use normalized features (default)")
     parser.add_argument("--no-norm", dest="norm", action="store_false", help="Disable feature normalization")
@@ -453,25 +527,6 @@ def main():
     os.makedirs(DATASET_DEFAULT_ROOT, exist_ok=True)
     df_raw.to_csv(org_out, index=False)
     df_raw.to_parquet(os.path.join(DATASET_DEFAULT_ROOT, f"{args.market}_latest.parquet"), index=False)
-
-    # --- Create an index CSV (equal-weighted average daily return) for model_predict ---
-    # model_predict expects ./dataset_default/index_data/{market}_index_2024.csv with columns ['datetime','daily_return']
-    try:
-        idx_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dataset_default", "index_data"))
-        os.makedirs(idx_dir, exist_ok=True)
-        # Use prev_close from df_raw to compute per-ticker daily return
-        df_idx = df_raw.copy()
-        if "prev_close" in df_idx.columns:
-            df_idx["daily_return"] = df_idx["close"] / df_idx["prev_close"] - 1
-            df_idx_summary = df_idx.groupby("dt")["daily_return"].mean().reset_index()
-            df_idx_summary = df_idx_summary.rename(columns={"dt": "datetime"})
-            index_out = os.path.join(idx_dir, f"{args.market}_index.csv")
-            df_idx_summary.to_csv(index_out, index=False)
-        else:
-            # If prev_close missing (shouldn't happen), skip index creation but warn
-            print("Warning: prev_close missing in raw data; skipping index CSV creation.")
-    except Exception as e:
-        print(f"Warning: failed to create index CSV: {e}")
 
     # 2) Labels and preprocessing
     df_lbl = get_label(df_raw, horizon=args.horizon)
@@ -537,6 +592,20 @@ def main():
             norm=args.norm,
             industry_mat=ind_mat,
         )
+
+    # 6) Create index CSV with the SAME dates as pkl files (after get_label filtering)
+    # This ensures benchmark dates match training data dates
+    print("Creating index CSV from filtered dates...")
+    idx_out_dir = os.path.join(os.path.dirname(__file__), "..", "dataset_default", "index_data")
+    os.makedirs(idx_out_dir, exist_ok=True)
+    idx_out_path = os.path.join(idx_out_dir, f"{args.market}_index.csv")
+    
+    # Use df_all which has the same date range as pkl files
+    index_df = df_all[["dt", "close"]].groupby("dt").mean().reset_index()
+    index_df.columns = ["Date", "index_close"]
+    index_df = index_df.sort_values("Date").reset_index(drop=True)
+    index_df.to_csv(idx_out_path, index=False)
+    print(f"Saved index CSV ({len(index_df)} dates) to {idx_out_path}")
 
     print("Dataset build complete.")
 

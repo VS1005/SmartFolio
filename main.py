@@ -19,6 +19,8 @@ from torch_geometric.loader import DataLoader
 from utils.risk_profile import build_risk_profile
 from tools.pathway_temporal import discover_monthly_shards_with_pathway
 from tools.pathway_monthly_builder import build_monthly_shards_with_pathway
+from gen_data.update_monthly_dataset import fetch_latest_month_data
+from trainer.evaluation_utils import apply_promotion_gate, aggregate_metric_records, persist_metrics, create_metric_record
 
 import shutil
 import pickle
@@ -26,6 +28,20 @@ from stable_baselines3.common.save_util import load_from_zip_file
 from trainer.ptr_ppo import PTR_PPO
 
 PATH_DATA = f'./dataset_default/'
+
+
+def get_risk_score_dir(base_dir: str, risk_score: float) -> str:
+    """Get the checkpoint directory for a specific risk score.
+    
+    Examples:
+        base_dir='checkpoints', risk_score=0.5 -> 'checkpoints_risk05'
+        base_dir='./checkpoints', risk_score=0.1 -> './checkpoints_risk01'
+    """
+    # Convert risk score to tag (0.5 -> '05', 0.1 -> '01')
+    risk_tag = str(risk_score).replace('.', '')
+    # Append risk tag to directory name
+    return f"{base_dir.rstrip('/')}_risk{risk_tag}"
+
 
 def _copy_compatible_policy_weights(policy_module, loaded_state, checkpoint_path):
     """Load only the tensors that match by key and shape to avoid shape-mismatch crashes."""
@@ -65,7 +81,8 @@ def _copy_compatible_policy_weights(policy_module, loaded_state, checkpoint_path
             f"Skipped {len(skipped)} tensors from {checkpoint_path} due to shape mismatches."
             f" Examples: {preview}"
         )
-
+    if not skipped:
+        print("All loaded policy tensors matched successfully.")
     return matched
 
 def load_weights_into_new_model(
@@ -271,160 +288,81 @@ def select_replay_samples(model, env, dataset, k_percent=0.3):
     print(f"Selected {len(selected_samples)} replay samples from {len(dataset)} total.")
     return selected_samples
 
-def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_path=None, replay_buffer=None):
-    """Fine-tune the PPO model on the latest unprocessed monthly shard."""
-    manifest_file = str(_resolve_manifest_path(args, manifest_path))
-    if not os.path.exists(manifest_file):
-        # Attempt to build manifest: first via Pathway, then via monthly dataset updater
-        built = False
-        if getattr(args, "discover_months_with_pathway", False):
-            base_dir_guess = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
-            try:
-                shards = build_monthly_shards_with_pathway(
-                    base_dir_guess,
-                    manifest_file,
-                    min_days=getattr(args, "min_month_days", 10),
-                    cutoff_days=getattr(args, "month_cutoff_days", None),
-                )
-                print(
-                    f"Built manifest at {manifest_file} with {len(shards)} monthly shards from {base_dir_guess}"
-                )
-                built = True
-            except Exception as exc:
-                print(f"Pathway build failed: {exc}")
-        if (not built):
-            try:
-                from gen_data import update_monthly_dataset
-                print("hello in monthly dataset updater")
-                updater_args = argparse.Namespace(
-                    market=args.market,
-                    horizon=int(args.horizon),
-                    relation_type=args.relation_type,
-                    lookback=getattr(args, "lookback", 30),
-                    threshold=0.5,
-                    n_clusters=8,
-                    disable_norm=False,
-                    dataset_root=None,
-                    corr_root=None,
-                    raw_path=None,
-                    tickers_file=args.tickers_file
-                )
-                print(f"Manifest missing; running monthly dataset updater to create {manifest_file}")
-                update_monthly_dataset.run(updater_args)
-                built = os.path.exists(manifest_file)
-            except Exception as exc:
-                print(f"Monthly dataset updater failed: {exc}")
-        if not built:
-            raise FileNotFoundError(f"Monthly manifest not found at {manifest_file} and auto-build failed")
-
-    with open(manifest_file, "r", encoding="utf-8") as fh:
-        manifest = json.load(fh)
-        print("manifest file loaded")
-
-    shards = manifest.get("monthly_shards", {})
-    print("shards", shards)
-    if (not shards) and getattr(args, "discover_months_with_pathway", False):
-        base_dir_guess = manifest.get(
-            "base_dir",
-            f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/',
-        )
+def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buffer=None, fetch_new_data=True):
+    """
+    Fine-tune the PPO model on the latest month derived from pkl files in the data directory.
+    
+    Simple logic:
+    1. Optionally fetch new data from yfinance (if fetch_new_data=True)
+    2. Scan pkl files in data_dir (named like 2024-11-29.pkl)
+    3. Parse dates from filenames
+    4. Group by month (YYYY-MM)
+    5. Find the latest month with data
+    6. Fine-tune on that month's data
+    
+    Args:
+        args: Namespace with market, horizon, relation_type, etc.
+        manifest_path: Deprecated (ignored)
+        bookkeeping_path: Deprecated (ignored)
+        replay_buffer: Optional list of replay samples from previous training
+        fetch_new_data: If True, fetch latest month from yfinance before fine-tuning
+    """
+    # Data directory containing daily pkl files
+    base_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
+    
+    # Optionally fetch new data from yfinance
+    if fetch_new_data:
         try:
-            discovered = build_monthly_shards_with_pathway(
-                base_dir_guess,
-                manifest_file,
-                min_days=getattr(args, "min_month_days", 10),
-                cutoff_days=getattr(args, "month_cutoff_days", None),
+            print("Fetching latest month data from yfinance...")
+            tickers_file = getattr(args, "tickers_file", "tickers.csv")
+            fetched_month = fetch_latest_month_data(
+                market=args.market,
+                horizon=int(args.horizon),
+                relation_type=args.relation_type,
+                tickers_file=tickers_file,
+                lookback=getattr(args, "lookback", 20),
             )
-            shards = discovered
-            manifest["monthly_shards"] = discovered
-            manifest["base_dir"] = base_dir_guess
-            with open(manifest_file, "w", encoding="utf-8") as fh:
-                json.dump(manifest, fh, indent=2)
-            print(
-                f"Discovered {len(discovered)} monthly shards via Pathway windows; "
-                f"updated manifest at {manifest_file}"
-            )
-        except Exception as exc:  # pragma: no cover - defensive for unexpected Pathway errors
-            print(f"Pathway month discovery failed: {exc}")
-    if not shards:
-        shards = {}
-
-    shards_list = []
-    last_ft = manifest.get("last_fine_tuned_month")
-    months = {}
-
-    daily_index = manifest.get("daily_index", {})
-    if isinstance(daily_index, dict):
-        for dt in daily_index.keys():
-            try:
-                lbl = datetime.strptime(dt, "%Y-%m-%d").strftime("%Y-%m")
-            except Exception:
-                continue
-            months.setdefault(lbl, []).append(dt)
-
-    if isinstance(shards, dict):
-        for lbl, payload in shards.items():
-            if isinstance(payload, dict) and payload.get("dates"):
-                months.setdefault(lbl, []).extend(payload["dates"])
-
-    for lbl, dates in months.items():
-        dates_sorted = sorted(set(dates))
-        shard = {
-            "month": lbl,
-            "dates": dates_sorted,
-            "month_start": dates_sorted[0],
-            "month_end": dates_sorted[-1],
-            "processed": bool(last_ft == lbl),
-        }
-        shards_list.append(shard)
-
-    if not shards_list:
-        raise ValueError("Manifest does not contain any shards (monthly_shards or daily_index)")
-
-    target_month_label = getattr(args, "fine_tune_month", None)
-    start_month_label = getattr(args, "fine_tune_start_month", None)
-    start_month_dt = None
-    if start_month_label:
-        try:
-            start_month_dt = datetime.strptime(start_month_label, "%Y-%m")
-        except ValueError as exc:
-            raise ValueError("--fine_tune_start_month must follow YYYY-MM format") from exc
-
-    unprocessed = []
-    for idx, shard in enumerate(shards_list):
-        if shard.get("processed", False):
-            continue
-        if shard.get("dates") and not shard.get("month_start"):
-            dates_sorted = sorted(shard["dates"])
-            shard["month_start"] = dates_sorted[0]
-            shard["month_end"] = dates_sorted[-1]
-        try:
-            month_label, month_start, month_end = _infer_month_dates(shard)
-        except ValueError:
-            # Can't infer dates from this shard, skip it
-            continue
-        unprocessed.append((idx, shard, month_label, month_start, month_end))
-
-    if not unprocessed:
-        if target_month_label:
-            raise RuntimeError(f"Target month {target_month_label} was not found or already processed.")
-        raise RuntimeError("No unprocessed monthly shards available for fine-tuning")
-
-    # Pick the most recent month
-    def _month_sort_key(item):
-        _, _, month_label, _, _ = item
-        return datetime.strptime(month_label, "%Y-%m")
-
-    shard_idx, shard, month_label, month_start, month_end = max(unprocessed, key=_month_sort_key)
-
-    base_dir = (
-        manifest.get("base_dir")
-        or f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
-    )
-
+            print(f"Successfully fetched data for month: {fetched_month}")
+        except Exception as e:
+            print(f"Warning: Could not fetch new data: {e}")
+            print("Continuing with existing data...")
+    
     if not os.path.exists(base_dir):
-        raise FileNotFoundError(f"Monthly shard data directory not found: {base_dir}")
-
+        raise FileNotFoundError(f"Data directory not found: {base_dir}")
+    
+    # Scan pkl files and parse dates from filenames
+    pkl_files = [f for f in os.listdir(base_dir) if f.endswith('.pkl')]
+    if not pkl_files:
+        raise ValueError(f"No pkl files found in {base_dir}")
+    
+    # Parse dates from filenames (e.g., "2024-11-29.pkl" -> datetime(2024, 11, 29))
+    dates = []
+    for f in pkl_files:
+        try:
+            date_str = f.replace('.pkl', '')
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            dates.append(dt)
+        except ValueError:
+            continue  # Skip files that don't match date format
+    
+    if not dates:
+        raise ValueError(f"No valid date-named pkl files found in {base_dir}")
+    
+    # Sort dates and find the latest
+    dates.sort()
+    latest_date = dates[-1]
+    
+    # Derive the month to fine-tune (the month of the latest date)
+    month_label = latest_date.strftime("%Y-%m")
+    
+    # Get all dates in this month
+    month_dates = [d for d in dates if d.strftime("%Y-%m") == month_label]
+    month_start = min(month_dates).strftime("%Y-%m-%d")
+    month_end = max(month_dates).strftime("%Y-%m-%d")
+    
+    print(f"Detected latest month: {month_label} ({len(month_dates)} trading days: {month_start} to {month_end})")
+    
+    # Load the monthly dataset
     monthly_dataset = AllGraphDataSampler(
         base_dir=base_dir,
         date=True,
@@ -436,8 +374,7 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     if len(monthly_dataset) == 0:
         raise ValueError(f"Monthly dataset for {month_label} is empty (start={month_start}, end={month_end})")
 
-    # Pad short lookback windows to the configured lookback to avoid stacking errors
-    # when monthly shards (or injected replay samples) have fewer trading days than args.lookback.
+    # Pad short lookback windows to the configured lookback
     target_lookback = getattr(args, "lookback", 30)
 
     def _pad_sample(sample):
@@ -477,21 +414,12 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     )
 
     env_init = create_env_init(args, data_loader=monthly_loader)
+    env_ref = env_init.envs[0] if hasattr(env_init, "envs") else env_init
+    args.lookback = getattr(env_ref, "lookback", getattr(args, "lookback", 30))
+    args.input_dim = getattr(env_ref, "feat_dim", getattr(args, "input_dim", 6))
 
-    previous_checkpoint = None
-    for prev_idx in range(shard_idx - 1, -1, -1):
-        prev_shard = shards_list[prev_idx]
-        prev_path = prev_shard.get("checkpoint_path") or prev_shard.get("checkpoint")
-        if prev_shard.get("processed") and prev_path and os.path.exists(prev_path):
-            previous_checkpoint = prev_path
-            break
-
-    manifest_last_ckpt = manifest.get("last_checkpoint_path")
+    # Find checkpoint to fine-tune from
     checkpoint_candidates = [
-        shard.get("checkpoint"),
-        shard.get("checkpoint_path"),
-        previous_checkpoint,
-        manifest_last_ckpt,
         getattr(args, "resume_model_path", None),
         getattr(args, "baseline_checkpoint", None),
     ]
@@ -499,7 +427,7 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
     checkpoint_path = next((p for p in checkpoint_candidates if os.path.exists(p)), None)
 
     if checkpoint_path is None:
-        raise FileNotFoundError("No valid base checkpoint found for fine-tuning")
+        raise FileNotFoundError("No valid base checkpoint found for fine-tuning. Provide --resume_model_path or --baseline_checkpoint")
 
     print(f"Fine-tuning {checkpoint_path} on month {month_label} ({month_start} to {month_end}) for {args.fine_tune_steps} timesteps")
 
@@ -549,39 +477,56 @@ def fine_tune_month(args, manifest_path="monthly_manifest.json", bookkeeping_pat
         )
 
     model.set_env(env_init)
-    model.learn(total_timesteps=getattr(args, "fine_tune_steps", 5000))
+    model.learn(total_timesteps=getattr(args, "fine_tune_steps", 1))
 
     new_replay_samples = []
     if getattr(args, "ptr_mode", False):
-        # Select high-val   ue samples from the current month to carry forward
+        # Select high-value samples from the current month to carry forward
         new_replay_samples = select_replay_samples(model, env_init, monthly_dataset, k_percent=0.1)
 
+    # save_dir already includes risk score (e.g., checkpoints_risk05/)
     os.makedirs(args.save_dir, exist_ok=True)
     month_slug = month_label.replace("/", "-")
     out_path = os.path.join(args.save_dir, f"{args.model_name}_{month_slug}.zip")
     model.save(out_path)
     print(f"Saved fine-tuned checkpoint to {out_path}")
 
-    shard.update({
-        "processed": True,
-        "checkpoint_path": out_path,
-        "processed_at": datetime.utcnow().isoformat(timespec="seconds"),
-    })
-    if isinstance(shards, dict):
-        manifest["monthly_shards"][month_label] = shard
+    # Evaluate the fine-tuned model on the monthly data for promotion decision
+    print(f"Evaluating fine-tuned model for promotion gate...")
+    
+    # Temporarily set test dates to the month's date range for model_predict
+    original_test_start = getattr(args, 'test_start_date', None)
+    original_test_end = getattr(args, 'test_end_date', None)
+    args.test_start_date = month_start
+    args.test_end_date = month_end
+
+    # Evaluate the fine-tuned model on the monthly data for promotion decision
+    print(f"Evaluating fine-tuned model for promotion gate...")
+    
+    # Temporarily set test dates to the month's date range for model_predict
+    original_test_start = getattr(args, 'test_start_date', None)
+    original_test_end = getattr(args, 'test_end_date', None)
+    args.test_start_date = month_start
+    args.test_end_date = month_end
+    
+    try:
+        final_eval = model_predict(args, model, monthly_loader, split="finetune_eval")
+    finally:
+        # Restore original test dates
+        args.test_start_date = original_test_start
+        args.test_end_date = original_test_end
+    
+    promotion_decision = apply_promotion_gate(
+        args,
+        out_path,
+        final_eval.get("summary"),
+        final_eval.get("log")
+    )
+    
+    if promotion_decision.promoted:
+        print(f"Model promoted to baseline: {getattr(args, 'baseline_checkpoint', 'N/A')}")
     else:
-        manifest["monthly_shards"][shard_idx] = shard
-    manifest["last_fine_tuned_month"] = month_label
-    manifest["last_checkpoint_path"] = out_path
-
-    output_manifest = bookkeeping_path or manifest_file
-
-    out_dir = os.path.dirname(output_manifest)
-    if out_dir and not os.path.exists(out_dir):
-        os.makedirs(out_dir, exist_ok=True)
-    with open(output_manifest, "w", encoding="utf-8") as fh:
-        json.dump(manifest, fh, indent=2)
-    print(f"Updated manifest at {output_manifest}")
+        print(f"Model NOT promoted. Reasons: {promotion_decision.reasons}")
 
     return out_path, new_replay_samples
 
@@ -604,6 +549,9 @@ def train_predict(args, predict_dt):
     val_loader = DataLoader(val_dataset, batch_size=len(val_dataset), pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), pin_memory=True)
     env_init = create_env_init(args, dataset=train_dataset)
+    env_ref = env_init.envs[0] if hasattr(env_init, "envs") else env_init
+    args.lookback = getattr(env_ref, "lookback", getattr(args, "lookback", 30))
+    args.input_dim = getattr(env_ref, "feat_dim", getattr(args, "input_dim", 6))
     if args.policy == 'MLP':
         if getattr(args, 'resume_model_path', None) and os.path.exists(args.resume_model_path):
             print(f"Loading PPO model from {args.resume_model_path}")
@@ -640,6 +588,7 @@ def train_predict(args, predict_dt):
     init_policy_bias_from_prior(model, getattr(args, "finrag_prior", None))
     train_model_and_predict(model, args, train_loader, val_loader, test_loader)
 
+    # save_dir already includes risk score (e.g., checkpoints_risk05/)
     if getattr(args, "ptr_mode", False):
         print("Selecting initial replay samples from pre-training data...")
         env_selection = create_env_init(args, dataset=train_dataset)
@@ -664,11 +613,10 @@ def train_predict(args, predict_dt):
         model.save(checkpoint_path)
         print(f"Saved pre-training checkpoint to {checkpoint_path}")
 
-        baseline_path = getattr(args, "baseline_checkpoint", None)
-        if baseline_path:
-            os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
-            shutil.copy2(checkpoint_path, baseline_path)
-            print(f"Updated baseline checkpoint at {baseline_path}")
+        # Copy to baseline.zip in the same risk-score directory
+        baseline_path = os.path.join(args.save_dir, "baseline.zip")
+        shutil.copy2(checkpoint_path, baseline_path)
+        print(f"Updated baseline checkpoint at {baseline_path}")
     except Exception as exc:
         print(f"Failed to save pre-training checkpoint: {exc}")
 
@@ -711,14 +659,14 @@ if __name__ == '__main__':
     
     parser.add_argument("--expert_cache_path", default=None,
                         help="Optional path to cache expert trajectories for reuse")
-    parser.add_argument("--num_expert_trajectories", type=int, default=100,
+    parser.add_argument("--num_expert_trajectories", type=int, default=700,
                         help="Number of expert trajectories to generate for IRL pretraining")
-    parser.add_argument("--max_epochs", type=int, default=1, help="Number of IRL+RL epochs to run")
-    parser.add_argument("--batch_size", type=int, default=32, help="Training batch size for loaders and IRL")
+    parser.add_argument("--max_epochs", type=int, default=10, help="Number of IRL+RL epochs to run")
+    parser.add_argument("--batch_size", type=int, default=512, help="Training batch size for loaders and IRL")
     parser.add_argument("--finrag_weights_path", default=None,
                         help="Path to FinRAG weights JSON used to initialize the policy prior")
     # Training hyperparameters
-    parser.add_argument("--irl_epochs", type=int, default=50, help="Number of IRL training epochs")
+    parser.add_argument("--irl_epochs", type=int, default=30, help="Number of IRL training epochs")
     parser.add_argument("--rl_timesteps", type=int, default=10000, help="Number of RL timesteps for training")
     parser.add_argument(
         "--disable-tensorboard",
@@ -728,7 +676,7 @@ if __name__ == '__main__':
     parser.add_argument("--n_steps", type=int, default=2048, help="Rollout horizon (environment steps) per PPO update cycle")
 
     # Risk-adaptive reward parameters
-    parser.add_argument("--risk_score", type=float, default=0.5, help="User risk score: 0=conservative, 1=aggressive")
+    parser.add_argument("--risk_score", type=float, default=0.1, help="User risk score: 0=conservative, 1=aggressive")
     parser.add_argument("--dd_base_weight", type=float, default=1.0, help="Base weight for drawdown penalty")
     parser.add_argument("--dd_risk_factor", type=float, default=1.0, help="Risk factor k in β_dd(ρ) = β_base*(1+k*(1-ρ))")
 
@@ -740,12 +688,12 @@ if __name__ == '__main__':
     parser.add_argument("--ptr_priority_type", type=str, default="max", help="Replay buffer priority aggregation strategy")
 
     # Date ranges
-    parser.add_argument("--train_start_date", default="2020-01-06", help="Start date for training")
-    parser.add_argument("--train_end_date", default="2023-01-31", help="End date for training")
-    parser.add_argument("--val_start_date", default="2023-02-01", help="Start date for validation")
-    parser.add_argument("--val_end_date", default="2023-12-29", help="End date for validation")
+    parser.add_argument("--train_start_date", default="2016-01-02", help="Start date for training")
+    parser.add_argument("--train_end_date", default="2023-12-31", help="End date for training")
+    parser.add_argument("--val_start_date", default="2024-01-02", help="Start date for validation")
+    parser.add_argument("--val_end_date", default="2024-01-31", help="End date for validation")
     parser.add_argument("--test_start_date", default="2024-01-02", help="Start date for testing")
-    parser.add_argument("--test_end_date", default="2024-12-26", help="End date for testing")
+    parser.add_argument("--test_end_date", default="2024-12-31", help="End date for testing")
     parser.add_argument("--tickers_file", default="tickers.csv", help="Path to CSV file containing list of tickers")
 
     args = parser.parse_args()
@@ -814,7 +762,6 @@ if __name__ == '__main__':
             "dataset_default",
             "expert_cache"
         )
-    os.makedirs(args.save_dir, exist_ok=True)
 
     data_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
     sample_files = [f for f in os.listdir(data_dir) if f.endswith('.pkl')]
@@ -831,46 +778,49 @@ if __name__ == '__main__':
 
     args.finrag_prior = load_finrag_prior(args.finrag_weights_path, args.num_stocks)
 
+    # Modify save_dir to include risk score (e.g., checkpoints -> checkpoints_risk05)
+    risk_score = getattr(args, "risk_score", 0.5)
+    args.save_dir = get_risk_score_dir(args.save_dir, risk_score)
+    os.makedirs(args.save_dir, exist_ok=True)
+    
+    # Set baseline checkpoint path (now just baseline.zip in the risk-score directory)
+    args.baseline_checkpoint = os.path.join(args.save_dir, "baseline.zip")
+    print(f"Using risk score: {risk_score} -> save_dir: {args.save_dir}")
+
     print("market:", args.market, "num_stocks:", args.num_stocks)
     if args.run_monthly_fine_tune:
-        manifest_path = args.manifest or None  
         replay_buffer = []
         
-        # Load initial buffer if available
+        # Load initial buffer if available (in the risk-score directory)
         buffer_path = os.path.join(args.save_dir, f"replay_buffer_{args.market}.pkl")
         if os.path.exists(buffer_path):
             with open(buffer_path, "rb") as f:
                 replay_buffer = pickle.load(f)
-            print(f"Loaded initial replay buffer with {len(replay_buffer)} samples.")
-            
-        while True:
-            try:
-                checkpoint, new_samples = fine_tune_month(args, manifest_path=manifest_path, replay_buffer=replay_buffer)
-                print(f"Monthly fine-tuning complete. Checkpoint: {checkpoint}")
-                
-                if new_samples:
-                    replay_buffer.extend(new_samples)
-                    max_buffer = getattr(args, "ptr_memory_size", 500)
-                    if len(replay_buffer) > max_buffer:
-                        replay_buffer = replay_buffer[-max_buffer:]
-                    print(f"Replay buffer updated. Current size: {len(replay_buffer)}")
-                    with open(buffer_path, "wb") as f:
-                        pickle.dump(replay_buffer, f)
-                    print(f"Persisted replay buffer to {buffer_path}")
-                
-                args.resume_model_path = checkpoint
-                if getattr(args, "fine_tune_month", None):
-                    print("Requested single-month fine-tune complete; exiting loop.")
-                    break
-            except RuntimeError as e:
-                if "No unprocessed monthly shards" in str(e):
-                    print("All months processed.")
-                    break
-                if getattr(args, "fine_tune_month", None) and "Target month" in str(e):
-                    print(str(e))
-                    break
-                else:
-                    raise e
+            print(f"Loaded initial replay buffer with {len(replay_buffer)} samples from {buffer_path}")
+        
+        # Use risk-score-based baseline as resume path if no explicit resume path provided
+        if not getattr(args, "resume_model_path", None) or not os.path.exists(args.resume_model_path):
+            if os.path.exists(args.baseline_checkpoint):
+                args.resume_model_path = args.baseline_checkpoint
+                print(f"Using baseline checkpoint as resume path: {args.resume_model_path}")
+        
+        # Call fine_tune_month once (fetches latest month and fine-tunes)
+        checkpoint, new_samples = fine_tune_month(args, replay_buffer=replay_buffer)
+        print(f"Monthly fine-tuning complete. Checkpoint: {checkpoint}")
+        
+        # Update replay buffer with new samples
+        if new_samples:
+            replay_buffer.extend(new_samples)
+            max_buffer = getattr(args, "ptr_memory_size", 500)
+            if len(replay_buffer) > max_buffer:
+                # Keep the most recent ones
+                replay_buffer = replay_buffer[-max_buffer:]
+            print(f"Replay buffer updated. Current size: {len(replay_buffer)}")
+            with open(buffer_path, "wb") as f:
+                pickle.dump(replay_buffer, f)
+            print(f"Persisted replay buffer to {buffer_path}")
+        # Update resume model path so that next run uses this checkpoint
+        args.resume_model_path = checkpoint
     else:
         trained_model = train_predict(args, predict_dt='2024-12-30')
         # save PPO model checkpoint
