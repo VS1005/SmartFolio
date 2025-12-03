@@ -237,6 +237,9 @@ def fetch_latest_month_data(
     
     Returns the month label (YYYY-MM) that was fetched.
     """
+    # Ensure horizon is int (may come as string from CLI args)
+    horizon = int(horizon)
+    
     # Data directory
     data_dir = os.path.join(DATASET_DEFAULT_ROOT, f"data_train_predict_{market}", f"{horizon}_{relation_type}")
     

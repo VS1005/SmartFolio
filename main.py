@@ -21,6 +21,7 @@ from utils.risk_profile import build_risk_profile
 from tools.pathway_temporal import discover_monthly_shards_with_pathway
 from tools.pathway_monthly_builder import build_monthly_shards_with_pathway
 from gen_data.update_monthly_dataset import fetch_latest_month_data
+from trainer.evaluation_utils import apply_promotion_gate, aggregate_metric_records, persist_metrics, create_metric_record
 
 import shutil
 import pickle
@@ -284,7 +285,7 @@ def select_replay_samples(model, env, dataset, k_percent=0.3):
     print(f"Selected {len(selected_samples)} replay samples from {len(dataset)} total.")
     return selected_samples
 
-def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buffer=None, fetch_new_data=False):
+def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buffer=None, fetch_new_data=True):
     """
     Fine-tune the PPO model on the latest month derived from pkl files in the data directory.
     
@@ -313,7 +314,7 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
             tickers_file = getattr(args, "tickers_file", "tickers.csv")
             fetched_month = fetch_latest_month_data(
                 market=args.market,
-                horizon=args.horizon,
+                horizon=int(args.horizon),
                 relation_type=args.relation_type,
                 tickers_file=tickers_file,
                 lookback=getattr(args, "lookback", 20),
@@ -487,8 +488,56 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
     model.save(out_path)
     print(f"Saved fine-tuned checkpoint to {out_path}")
 
-    return out_path, new_replay_samples
-    print(f"Updated manifest at {output_manifest}")
+    # Evaluate the fine-tuned model on the monthly data for promotion decision
+    print(f"Evaluating fine-tuned model for promotion gate...")
+    eval_records = []
+    env_snapshots = []
+    try:
+        # Create a fresh environment for evaluation
+        eval_env = create_env_init(args, data_loader=monthly_loader)
+        obs = eval_env.reset()
+        done = False
+        step_count = 0
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, info = eval_env.step(action)
+            step_count += 1
+            if step_count > len(monthly_dataset) * 2:  # Safety limit
+                break
+        
+        # Extract metrics from environment
+        env_ref = eval_env.envs[0] if hasattr(eval_env, "envs") else eval_env
+        metrics = {
+            "arr": getattr(env_ref, "ARR", None),
+            "avol": getattr(env_ref, "AVol", None),
+            "sharpe": getattr(env_ref, "sharpe", None),
+            "mdd": getattr(env_ref, "MDD", None),
+            "cr": getattr(env_ref, "CR", None),
+            "ir": getattr(env_ref, "IR", None),
+        }
+        record = create_metric_record(args, "finetune", metrics, 0)
+        eval_records.append(record)
+        env_snapshots.append((env_ref, record["run_id"]))
+        print(f"Evaluation metrics: Sharpe={metrics.get('sharpe')}, MDD={metrics.get('mdd')}")
+    except Exception as e:
+        print(f"Warning: Could not evaluate fine-tuned model: {e}")
+        metrics = {}
+
+    # Persist metrics and apply promotion gate
+    log_info = persist_metrics(eval_records, env_snapshots, args, "finetune", base_dir="logs/monthly")
+    summary_metrics = aggregate_metric_records(eval_records)
+    
+    promotion_decision = apply_promotion_gate(
+        args,
+        candidate_path=out_path,
+        summary_metrics=summary_metrics,
+        log_info=log_info,
+    )
+    
+    if promotion_decision.promoted:
+        print(f"Model promoted to baseline: {getattr(args, 'baseline_checkpoint', 'N/A')}")
+    else:
+        print(f"Model NOT promoted. Reasons: {promotion_decision.reasons}")
 
     return out_path, new_replay_samples
 
