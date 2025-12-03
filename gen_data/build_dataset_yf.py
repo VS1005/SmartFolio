@@ -601,9 +601,13 @@ def main():
     idx_out_path = os.path.join(idx_out_dir, f"{args.market}_index.csv")
     
     # Use df_all which has the same date range as pkl files
+    # Compute equal-weighted average close per day, then compute daily returns
     index_df = df_all[["dt", "close"]].groupby("dt").mean().reset_index()
-    index_df.columns = ["Date", "index_close"]
-    index_df = index_df.sort_values("Date").reset_index(drop=True)
+    index_df = index_df.sort_values("dt").reset_index(drop=True)
+    index_df["daily_return"] = index_df["close"].pct_change()
+    index_df = index_df.dropna(subset=["daily_return"])  # Drop first row with NaN return
+    index_df = index_df.rename(columns={"dt": "datetime"})
+    index_df = index_df[["datetime", "daily_return"]]
     index_df.to_csv(idx_out_path, index=False)
     print(f"Saved index CSV ({len(index_df)} dates) to {idx_out_path}")
 

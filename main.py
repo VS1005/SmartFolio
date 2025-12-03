@@ -643,7 +643,7 @@ def train_predict(args, predict_dt):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Transaction ..")
     parser.add_argument("-device", "-d", default="cuda:0", help="gpu")
-    parser.add_argument("-model_name", "-nm", default="SmartFolio", help="Model name used in checkpoints and logs")
+    parser.add_argument("-model_name", "-nm", default="Inter", help="Model name used in checkpoints and logs")
     parser.add_argument("-horizon", "-hrz", default="1", help="Return prediction horizon in trading days")
     parser.add_argument("-relation_type", "-rt", default="hy", help="Correlation relation type label (default: hy)")
     parser.add_argument("-ind_yn", "-ind", default="y", help="Enable industry relation graph")
