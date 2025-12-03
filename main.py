@@ -788,8 +788,6 @@ if __name__ == '__main__':
             "dataset_default",
             "expert_cache"
         )
-    # ensure save dir
-    os.makedirs(args.save_dir, exist_ok=True)
 
     # Auto-detect num_stocks from a sample pickle file
     data_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'

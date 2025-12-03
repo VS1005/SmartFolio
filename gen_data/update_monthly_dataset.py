@@ -332,13 +332,14 @@ def fetch_latest_month_data(
     if df_raw.empty:
         raise ValueError("No data returned from yfinance")
     
-    # Update the index CSV with new month's daily returns (for benchmark comparison)
-    _update_index_csv(df_raw, market)
-    
     # Process data (same as build_dataset_yf.py)
+    # NOTE: get_label() drops last `horizon` dates (no forward return)
     df_lbl = get_label(df_raw, horizon=horizon)
     df_roll = cal_rolling_mean_std(df_lbl, cal_cols=["close", "volume"], lookback=5, use_pathway=False)
     df_norm = group_and_norm(df_roll, base_cols=["close_mean", "close_std", "volume_mean", "volume_std"], n_clusters=4)
+    
+    # Update the index CSV AFTER get_label so dates match pkl files
+    _update_index_csv(df_lbl, market)
     
     # Filter codes
     codes = filter_code(df_norm)

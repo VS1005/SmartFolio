@@ -293,10 +293,16 @@ PPO_PARAMS = {
 
 
 def model_predict(args, model, test_loader, split: str = "test"):
-    df_benchmark = pd.read_csv(f"./dataset_default/index_data/{args.market}_index.csv")
-    df_benchmark = df_benchmark[(df_benchmark['datetime'] >= args.test_start_date) &
-                                (df_benchmark['datetime'] <= args.test_end_date)]
-    benchmark_return = df_benchmark['daily_return']
+    # Load benchmark data
+    benchmark_return = None
+    try:
+        df_benchmark = pd.read_csv(f"./dataset_default/index_data/{args.market}_index.csv")
+        df_benchmark = df_benchmark[(df_benchmark['datetime'] >= args.test_start_date) &
+                                    (df_benchmark['datetime'] <= args.test_end_date)]
+        benchmark_return = df_benchmark['daily_return'].reset_index(drop=True)
+        print(f"[model_predict] Loaded benchmark with {len(benchmark_return)} dates for range {args.test_start_date} to {args.test_end_date}")
+    except Exception as e:
+        print(f"[model_predict] Warning: Could not load benchmark: {e}")
 
     ticker_map = get_ticker_mapping_for_period(
         args.market,
@@ -311,6 +317,7 @@ def model_predict(args, model, test_loader, split: str = "test"):
 
     for batch_idx, data in enumerate(test_loader):
         corr, ts_features, features, ind, pos, neg, labels, pyg_data, mask = process_data(data, device=args.device)
+        
         env_test = StockPortfolioEnv(
             args=args,
             corr=corr,
