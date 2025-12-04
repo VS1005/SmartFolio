@@ -33,6 +33,6 @@ All tools share a common configuration dataclass mirroring `OrchestratorConfig`,
 - Provide structured JSON schemas for inputs/outputs (Pydantic or dataclasses converted to dicts) to stay MCP-compliant.
 
 ## Deployment Notes
-- `tools_mcp` will mirror the required files from `tools/` but may include MCP-specific wrappers.
+- `explainibility_agents/mcp` houses the MCP-specific wrappers while sharing code with the main LangGraph pipeline.
 - Environment variables (e.g., `OPENAI_API_KEY` or `LLM_PROVIDER`) continue to be read at runtime; MCP server just surfaces missing-key errors through tool errors.
 - Future extension: add streaming tokens from LLM calls as MCP progress messages if needed.

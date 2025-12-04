@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Dict
 
-from tools import orchestrator_xai as base_orchestrator
+from explainibility_agents import orchestrator_xai as base_orchestrator
 
 from .config import XAIRequest
 from .registry import register_mcp_tool

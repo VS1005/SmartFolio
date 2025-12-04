@@ -13,8 +13,8 @@ from torch.autograd import Variable
 from torch_geometric.data import Data
 from tqdm import tqdm
 
-from tools.pathway_alignment import asof_align_macro
-from tools.pathway_features import compute_rolling_mean_std_pathway
+from explainibility_agents.pathway_alignment import asof_align_macro
+from explainibility_agents.pathway_features import compute_rolling_mean_std_pathway
 
 # Optional dependency; this file is meant to be run as a standalone data builder
 try:

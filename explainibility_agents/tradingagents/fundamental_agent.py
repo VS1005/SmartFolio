@@ -8,7 +8,7 @@ import pathway as pw
 
 import yfinance as yf  # type: ignore[import]
 
-from tradingagents import llm_client
+from . import llm_client
 
 _METRIC_FIELDS = [
     ("revenue", "Total Revenue", "currency"),

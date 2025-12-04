@@ -26,19 +26,18 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 # ---------------------------------------------------------------------
-# 🔧 Fix PYTHONPATH so the script finds trading_agent/tradingagents/
+# 🔧 Fix PYTHONPATH so `python explainibility_agents/run_trading_agents.py` works
 # ---------------------------------------------------------------------
-ROOT = Path(__file__).resolve().parents[1]  # /SmartFolio
-AGENT_ROOT = ROOT / "trading_agent"
-if str(AGENT_ROOT) not in sys.path:
-    sys.path.insert(0, str(AGENT_ROOT))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # ---------------------------------------------------------------------
 # ✅ Import TradingAgents
 # ---------------------------------------------------------------------
-from tradingagents.combined_weight_agent import WeightSynthesisAgent
-from tradingagents.fundamental_agent import FundamentalWeightAgent
-from tradingagents.news_agent import NewsWeightReviewAgent
+from explainibility_agents.tradingagents.combined_weight_agent import WeightSynthesisAgent
+from explainibility_agents.tradingagents.fundamental_agent import FundamentalWeightAgent
+from explainibility_agents.tradingagents.news_agent import NewsWeightReviewAgent
 
 console = Console()
 
@@ -161,11 +160,6 @@ def parse_args():
         help="Process only the snapshot for this YYYY-MM-DD date (requires as_of/date column).",
     )
     p.add_argument(
-        "--trading-agent-root",
-        default=str(AGENT_ROOT),
-        help="Path to trading_agent package (default: trading_agent)",
-    )
-    p.add_argument(
         "--include-components",
         action="store_true",
         help="Include detailed fundamentals and news components in markdown output.",
@@ -253,10 +247,6 @@ def run_agent_for_row(row, args):
 # ---------------------------------------------------------------------
 def main():
     args = parse_args()
-
-    requested_root = Path(args.trading_agent_root).expanduser().resolve()
-    if requested_root != AGENT_ROOT.resolve() and str(requested_root) not in sys.path:
-        sys.path.insert(0, str(requested_root))
 
     def _load_allocations() -> pd.DataFrame:
         if args.monthly_log_csv:

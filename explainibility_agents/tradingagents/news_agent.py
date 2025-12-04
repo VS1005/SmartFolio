@@ -18,7 +18,7 @@ import pathway as pw
 import requests
 import yfinance as yf
 
-from tradingagents import llm_client
+from . import llm_client
 
 # --- CHANGED: Replaced VADER with Transformers (FinBERT) ---
 try:

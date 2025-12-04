@@ -5,25 +5,49 @@ Latent Factor Explanation Module (LLM-Enhanced).
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# Add repo root to path
+# Add repo root so `python explainibility_agents/explain_latent.py` works
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-TRADING_AGENT_ROOT = REPO_ROOT / "trading_agent"
-if TRADING_AGENT_ROOT.exists() and str(TRADING_AGENT_ROOT) not in sys.path:
-    sys.path.insert(0, str(TRADING_AGENT_ROOT))
-
 from experiments.latent_factors import collect_traces, train_ae, extract_features
-from tradingagents.llm_provider import ProviderError, generate_completion
+from explainibility_agents.tradingagents.llm_provider import ProviderError, generate_completion
+
+def _normalize_symbol(token: str) -> str:
+    token = token.strip()
+    return token.replace(".ns", "").replace(".NS", "").upper()
+
 
 def _clean_feature_name(name: str) -> str:
-    name = name.replace("t-0", "").replace("t-1", "Lag-1").replace("_", " ").strip()
-    return " ".join([word.capitalize() for word in name.split()])
+    cleaned = name.replace("t-0", "").replace("t-1", "Lag-1").replace("_", " ").strip()
+
+    def _replace_symbols(match: re.Match[str]) -> str:
+        inside = match.group(1)
+        parts = [part for part in (p.strip() for p in inside.split(",")) if part]
+        normalized = ", ".join(_normalize_symbol(part) for part in parts)
+        return f"[{normalized}]"
+
+    cleaned = re.sub(r"\[([^\]]+)\]", _replace_symbols, cleaned)
+    cleaned = cleaned.replace(".ns", ".NS")  # normalize suffix before casing
+    words = cleaned.split()
+    return " ".join(word.capitalize() if word.isalpha() else word for word in words)
+
+
+def _extract_primary_symbol(feature: str) -> Optional[str]:
+    bracket_match = re.search(r"\[([^\]]+)\]", feature)
+    if bracket_match:
+        tokens = [tok for tok in (p.strip() for p in bracket_match.group(1).split(",")) if tok]
+        if tokens:
+            return _normalize_symbol(tokens[0])
+    if "::" in feature:
+        prefix = feature.split("::", maxsplit=1)[0]
+        return _normalize_symbol(prefix)
+    return None
 
 def _get_llm_interpretations(factors: List[tuple], model_name: str) -> Dict[str, str]:
     """Use the centralized LLM provider to interpret latent factors."""
@@ -62,9 +86,39 @@ def _derive_interpretation(features: List[str]) -> str:
     if not features: return "Unknown"
     first_parts = [f.split('_')[0] for f in features[:3]]
     last_parts = [f.split('_')[-1] for f in features[:3]]
-    if len(set(first_parts)) == 1: return f"Single Stock: {first_parts[0]}"
+    primary = _extract_primary_symbol(features[0])
+    if len(set(first_parts)) == 1 and primary:
+        return f"Single Stock: {primary}"
     if len(set(last_parts)) == 1: return f"Market-wide {last_parts[0].capitalize()}"
     return "Composite Factor"
+
+
+def _prettify_label(label: str) -> str:
+    if not label:
+        return "Unlabeled Factor"
+    clean = label.strip()
+    if clean.lower().startswith("single stock:"):
+        _, _, ticker = clean.partition(":")
+        ticker = ticker.strip().upper() or "N/A"
+        return f"Single Stock · {ticker}"
+    return clean[:1].upper() + clean[1:]
+
+
+def _describe_factor(label: str, features: List[str]) -> str:
+    pretty = _prettify_label(label)
+    top_names = [_clean_feature_name(name) for name in features[:2] if name]
+    driver_stub = ", ".join(top_names) if top_names else "its strongest drivers"
+    pretty_lower = pretty.lower()
+
+    if "single stock" in pretty_lower:
+        focus = pretty.split("·", maxsplit=1)[-1].strip() or "the focus ticker"
+        return f"Concentrated exposure to {focus}, primarily reacting to {driver_stub}."
+    if "market-wide" in pretty_lower:
+        regime = pretty.split(" ", maxsplit=1)[-1].strip().lower()
+        return f"Broad {regime} regime captured through {driver_stub}."
+    if "composite" in pretty_lower:
+        return f"Blended multi-name signal mixing {driver_stub}."
+    return f"{pretty} pattern led by {driver_stub}."
 
 def run_latent_pipeline(
     model_path: str,
@@ -131,11 +185,11 @@ def run_latent_pipeline(
         llm_labels = _get_llm_interpretations(sorted_items, llm_model)
 
     lines = []
-    lines.append("### 🧠 Latent Factor Analysis")
+    lines.append("### Latent Factor Analysis")
     lines.append(f"**Analysis Window:** {start_date} to {end_date}")
     lines.append("")
-    lines.append("| Factor | Top Drivers (Feature & Impact) | Interpretation |")
-    lines.append("| :--- | :--- | :--- |")
+    lines.append("| Top Drivers | Interpretation |")
+    lines.append("| :--- | :--- |")
     
     for latent_id, info in sorted_items:
         feats = info["feature_names"]
@@ -143,14 +197,15 @@ def run_latent_pipeline(
         
         driver_strs = []
         for n, w in zip(feats[:3], weights[:3]):
-            icon = "🟢" if w > 0 else "🔴"
-            driver_strs.append(f"{icon} **{_clean_feature_name(n)}** `({w:.2f})`")
+            driver_strs.append(f"- **{_clean_feature_name(n)}** ({w:.2f})")
         
         # Use LLM label if available, else heuristic
         clean_id = latent_id.replace("latent_", "F")
         label = llm_labels.get(latent_id) or llm_labels.get(clean_id) or _derive_interpretation(feats)
-        
-        lines.append(f"| **{clean_id}** | {'<br>'.join(driver_strs)} | {label} |")
+        pretty_label = _prettify_label(label)
+        drivers_block = "<br>".join([f"**{pretty_label}**"] + driver_strs)
+        interpretation = _describe_factor(label, feats)
+        lines.append(f"| {drivers_block} | {interpretation} |")
 
     lines.append("")
     lines.append("> *Labels generated by AI analysis of feature weights.*" if llm else "> *Labels generated by heuristic rules.*")

@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List
 
-from tools.orchestrator_xai import top_k_for_date_from_log
-from tradingagents.combined_weight_agent import WeightSynthesisAgent
+from explainibility_agents.pipeline import top_k_for_date_from_log
+from explainibility_agents.tradingagents.combined_weight_agent import WeightSynthesisAgent
 
 from .config import XAIRequest
 from .registry import register_mcp_tool

@@ -5,13 +5,13 @@ from typing import Any, Dict, List, Optional
 
 import pathway as pw
 
-from tradingagents.fundamental_agent import FundamentalWeightAgent, WeightReport
-from tradingagents.news_agent import (
+from .fundamental_agent import FundamentalWeightAgent, WeightReport
+from .news_agent import (
     NewsArticle,
     NewsWeightReport,
     NewsWeightReviewAgent,
 )
-from tradingagents.llm_client import summarise_weight_points
+from .llm_client import summarise_weight_points
 
 
 @dataclass
@@ -165,7 +165,7 @@ def _build_combined_report(
 
 	summary_points = _synthesise_summary(fundamental_report, news_report)
 	used_llm = False
-		if use_llm:
+	if use_llm:
 		fund_markdown = fundamental_report.to_markdown(include_metrics=True)
 		news_markdown = news_report.to_markdown(include_articles=True)
 		llm_points = summarise_weight_points(
@@ -176,7 +176,7 @@ def _build_combined_report(
 			news_points=news_report.points,
 			metrics_table=fund_markdown,
 			news_table=news_markdown,
-				max_points=len(summary_points) or 4,
+			max_points=len(summary_points) or 4,
 			model=llm_model,
 		)
 		if llm_points:

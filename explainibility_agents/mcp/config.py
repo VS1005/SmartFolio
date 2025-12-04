@@ -69,7 +69,7 @@ class XAIRequest:
         return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
     def to_orchestrator_config(self):  # lazy import to avoid circular refs
-        from tools.orchestrator_xai import OrchestratorConfig
+        from explainibility_agents.orchestrator_xai import OrchestratorConfig
 
         return OrchestratorConfig(
             date=self.date,
