@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """
 SmartFolio HGAT Attention-Only Explainability
 ==============================================
@@ -20,9 +19,6 @@ from pathlib import Path
 import numpy as np
 import google.generativeai as genai
 
-# -----------------------------
-# CONSTANTS
-# -----------------------------
 SYSTEM_PROMPT = (
     "You are a quantitative explainability analyst specializing in graph-based models. "
     "You will analyze the HGAT (Hierarchical Graph Attention Network) explainability summary "
@@ -31,10 +27,6 @@ SYSTEM_PROMPT = (
     "and cross-stock influence patterns clearly and concisely for a technical audience."
 )
 
-
-# -----------------------------
-# ARGUMENTS
-# -----------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="Explain HGAT attention summary JSON using Gemini 2.0 Flash.")
     p.add_argument(
@@ -64,10 +56,6 @@ def parse_args():
     )
     return p.parse_args()
 
-
-# -----------------------------
-# LOAD ATTENTION SUMMARY
-# -----------------------------
 def load_attention_summary(attention_path: Path):
     if not attention_path.exists():
         raise FileNotFoundError(f"Attention summary file not found: {attention_path}")
@@ -75,7 +63,6 @@ def load_attention_summary(attention_path: Path):
     with open(attention_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # if file already contains 'attention_summary' at root
     if "attention_summary" in data:
         attn = data["attention_summary"]
     else:
@@ -102,10 +89,6 @@ def load_attention_summary(attention_path: Path):
 
     return summary
 
-
-# -----------------------------
-# PROMPT ASSEMBLY
-# -----------------------------
 def assemble_prompt(attn_summary: dict) -> str:
     """
     Builds a precise, LLM-ready prompt for HGAT interpretability.
@@ -168,10 +151,6 @@ def assemble_prompt(attn_summary: dict) -> str:
 
     return json.dumps(payload, indent=2)
 
-
-# -----------------------------
-# GEMINI GENERATION
-# -----------------------------
 def llm_generate(prompt: str, model="gemini-2.0-flash", retries=3, delay=5) -> str:
     key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not key:
@@ -196,10 +175,6 @@ def llm_generate(prompt: str, model="gemini-2.0-flash", retries=3, delay=5) -> s
             return f"**LLM generation failed:** {e}"
     return "**LLM unavailable.**"
 
-
-# -----------------------------
-# MAIN
-# -----------------------------
 def main():
     args = parse_args()
     attention_path = Path(args.attention_json).expanduser()
@@ -213,20 +188,15 @@ def main():
 
     prompt = assemble_prompt(attn_summary)
 
-    # Save prompt for reproducibility
     out_dir = Path(args.output).parent
     out_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = out_dir / "hgat_attention_prompt.json"
     prompt_path.write_text(prompt, encoding="utf-8")
     print(f"[INFO] Prompt saved at {prompt_path}")
-
-    # Generate LLM explanation
     if args.llm:
         narrative = llm_generate(prompt, model=args.llm_model)
     else:
         narrative = f"Loaded HGAT attention summary for model: {attn_summary.get('model_path', 'N/A')}"
-
-    # Save final narrative
     out_path = Path(args.output)
     out_path.write_text(narrative, encoding="utf-8")
     print(f"[INFO] Narrative saved to {out_path}")
@@ -234,10 +204,8 @@ def main():
     if args.print:
         print("\n--- HGAT Attention Narrative ---\n")
         print(narrative)
-        print("\n--------------------------------")
 
     print(" Done.")
-
 
 if __name__ == "__main__":
     main()

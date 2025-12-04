@@ -66,8 +66,6 @@ def train_model_one(args, train_loader):
         trained_model = model.learn(total_timesteps=1000)
         return trained_model
 
-
-# Create a placeholder environment that can later be swapped via model.set_env()
 def create_env_init(args, dataset=None, data_loader=None):
     if data_loader is None:
         data_loader = DataLoader(dataset, batch_size=len(dataset), pin_memory=True, collate_fn=lambda x: x,
@@ -87,7 +85,6 @@ def create_env_init(args, dataset=None, data_loader=None):
         env, _ = env.get_sb_env()
         print("Placeholder environment created")
         return env
-
 
 # Train by iterating over mini-batches
 def train_model_and_predict(model, args, train_loader, val_loader, test_loader):
@@ -143,7 +140,6 @@ def train_model_and_predict_hierarchical(model, args, train_loader, val_loader, 
               f" Val mean reward: {mean_reward}, Std: {std_reward}")
         model_predict(args, trained_model, test_loader)
 
-# Treat the entire training sequence as a single batch
 def train_and_predict(args, train_loader, test_loader):
     for batch_idx, data in enumerate(train_loader):
         corr, ts_features, features, labels, pyg_data, mask = process_data(data, device=args.device)

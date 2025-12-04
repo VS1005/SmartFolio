@@ -60,7 +60,6 @@ def _save_state(state: Dict[str, Any]) -> None:
 
 def _acquire_lock() -> bool:
     if os.path.exists(LOCK_FILE):
-        # Stale lock older than 24h? remove.
         try:
             mtime = os.path.getmtime(LOCK_FILE)
             if time.time() - mtime > 24 * 3600:
@@ -170,7 +169,6 @@ def main():
             print("[agent] No new month detected; exiting.")
             return
 
-        # Step 1: build/update monthly dataset (uses update_monthly_dataset.py)
         data_cmd = (
             f"python -m gen_data.update_monthly_dataset "
             f"--market {args.market} "
@@ -183,7 +181,6 @@ def main():
             print(f"[agent] Data build failed with code {rc}")
             return
 
-        # Step 2: rebuild manifest/shards (fine_tune_month will rebuild if discover flag is set)
         ft_cmd = (
             f"python main.py --run_monthly_fine_tune "
             f"--market {args.market} "
@@ -196,8 +193,6 @@ def main():
         if rc != 0:
             print(f"[agent] Fine-tune run failed with code {rc}")
             return
-
-        # Update state
         manifest_after = _read_manifest(str(manifest_path))
         last_ft = manifest_after.get("last_fine_tuned_month") or _latest_month_from_manifest(manifest_after)
         state["last_processed_month"] = last_ft
@@ -206,7 +201,6 @@ def main():
 
     finally:
         _release_lock()
-
 
 if __name__ == "__main__":
     main()

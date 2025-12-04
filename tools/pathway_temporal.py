@@ -20,7 +20,6 @@ def _iter_daily_files(base_dir: str) -> Iterable[Tuple[datetime.datetime, str]]:
             ts = datetime.datetime.strptime(date_part, "%Y-%m-%d")
         except ValueError:
             continue
-        # pathway.debug.table_from_rows expects tuples in schema field order
         yield (ts, os.path.join(base_dir, name))
 
 
@@ -48,7 +47,6 @@ def discover_monthly_shards_with_pathway(
     if not raw_rows:
         return []
 
-    # Normalize to tuples in schema order in case callers provide dicts or other iterables.
     rows: List[Tuple[datetime.datetime, str]] = []
     for idx, item in enumerate(raw_rows):
         normalized: Tuple[datetime.datetime, str]

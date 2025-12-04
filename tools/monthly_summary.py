@@ -1,6 +1,4 @@
-"""Aggregate monthly evaluation metrics for monitoring."""
 from __future__ import annotations
-
 from pathlib import Path
 from typing import List
 
@@ -23,7 +21,6 @@ def load_monthly_frames(base_dir: Path) -> List[pd.DataFrame]:
         frames.append(df)
     return frames
 
-
 def compute_summary(df: pd.DataFrame) -> pd.DataFrame:
     group_cols = ["month", "market", "policy", "split"]
     available_numeric = [col for col in NUMERIC_COLUMNS if col in df.columns]
@@ -32,7 +29,6 @@ def compute_summary(df: pd.DataFrame) -> pd.DataFrame:
     summary = df.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
     summary = summary.rename(columns={"run_id": "evaluations"})
     return summary
-
 
 def main() -> None:
     base_dir = Path("logs/monthly")
@@ -52,7 +48,6 @@ def main() -> None:
     summary.to_csv(output_path, index=False)
     print(f"Wrote monthly summary to {output_path}")
     print(summary)
-
 
 if __name__ == "__main__":
     main()

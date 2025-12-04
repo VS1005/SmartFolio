@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 from __future__ import annotations
 
 import argparse
@@ -7,7 +5,6 @@ import json
 import math
 from pathlib import Path
 from typing import Sequence
-
 import numpy as np
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
@@ -23,14 +20,11 @@ from model import (
     variance_explained,
 )
 
-# Note: preproc.py is no longer needed for activations training
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train sparse autoencoder on PPO activations")
     parser.add_argument("--data-path", required=True, help="Path to traces NPZ produced by updated collect_traces.py")
     parser.add_argument("--output-dir", default="experiments/latent_factors/checkpoints", help="Where to store checkpoints")
     
-    # Model architecture
     parser.add_argument("--model-type", type=str, default="topk", choices=["topk", "l1", "jumprelu"],
                         help="Type of sparse autoencoder: topk (recommended), l1 (original), jumprelu")
     parser.add_argument("--latent-dim", type=int, default=64, help="Latent dimensionality (increase for complex data)")
@@ -103,7 +97,6 @@ def compute_r2_batch(model, loader, device, model_type: str) -> dict:
     # R² computation
     r2 = variance_explained(recons, targets).item()
     
-    # Latent statistics
     latent_active = (latents.abs() > 1e-6).float().mean().item()
     latent_var = latents.var(dim=0).mean().item()
     
@@ -115,16 +108,11 @@ def compute_r2_batch(model, loader, device, model_type: str) -> dict:
         "latent_var": latent_var,
     }
 
-
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Use the new dataset which loads activations
     dataset = TraceDataset(args.data_path)
-    
-    # Input dimension is now the size of the activation vector (e.g. 128)
     input_dim = dataset.activations_flat.shape[1]
     
     print(f"Loaded dataset: {len(dataset)} samples")
@@ -142,7 +130,6 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     device = torch.device(args.device)
     
-    # Create model
     if args.model_type == "topk":
         model = TopKSparseAutoencoder(
             input_dim=input_dim,
@@ -153,7 +140,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             tied_weights=args.tied_weights,
             normalize_decoder=args.normalize_decoder,
             activation=args.activation,
-            use_pre_bias=True, # Important for centering activations
+            use_pre_bias=True, 
         ).to(device)
     elif args.model_type == "jumprelu":
         model = JumpReLUSparseAutoencoder(
@@ -290,7 +277,6 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     print(f"\nBest val R²: {best_val_r2:.4f} at epoch {best_epoch}")
     
-    # Save final
     torch.save(
         {
             "model_state_dict": model.state_dict(),

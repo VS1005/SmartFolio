@@ -25,14 +25,12 @@ def get_user_input(current_args):
     
     args = current_args.copy()
     
-    # Quick prompt for action
     action = input(f"Ready to run with date={args['date']}? (Press Enter to run, 'c' to configure, 'q' to quit): ").strip().lower()
     if action == 'q':
         return None
     if action != 'c':
         return args
 
-    # Detailed configuration
     for key, default_val in args.items():
         prompt = f"{key} [{default_val}]: "
         user_val = input(prompt).strip()
@@ -40,7 +38,6 @@ def get_user_input(current_args):
         if user_val:
             if user_val.lower() == 'exit': return None
             
-            # Type conversion
             if isinstance(default_val, bool):
                 if user_val.lower() in ('y', 'yes', 'true', 't', '1'):
                     args[key] = True
@@ -62,15 +59,13 @@ def get_user_input(current_args):
     return args
 
 async def run():
-    print("🚀 Connecting to SmartFolio MCP Server (Streamable HTTP)...")
+    print(" Connecting to SmartFolio MCP Server (Streamable HTTP)...")
     print("   Ensure 'python3 start_mcp.py' is running in another terminal!")
     
-    # Connect to the running server via FastMCP Client (Streamable HTTP)
-    # The Pathway MCP server uses streamable-http transport on /mcp/ by default
     client = Client("http://localhost:9123/mcp/")
 
     async with client:
-        print("✅ Server Connected!")
+        print(" Server Connected!")
         
         current_args = DEFAULT_ARGS.copy()
         
@@ -80,18 +75,15 @@ async def run():
                 print("Exiting...")
                 break
             
-            # Update defaults for next run
             current_args = run_args
             
-            print(f"\n🛠️  Executing 'run_xai_orchestrator' for {run_args['date']}...")
+            print(f"\n  Executing 'run_xai_orchestrator' for {run_args['date']}...")
             
             try:
-                # Call the tool
                 result = await client.call_tool("run_xai_orchestrator", arguments=run_args)
                 
-                print("\n✅ Tool Execution Successful!")
+                print("\n Tool Execution Successful!")
                 print("-" * 40)
-                # FastMCP returns a list of Content objects or similar
                 if hasattr(result, 'content'):
                     for content in result.content:
                         if hasattr(content, 'text'):
@@ -99,12 +91,11 @@ async def run():
                         else:
                             print(content)
                 else:
-                    # Fallback if result is just text or list
                     print(result)
                 print("-" * 40)
                     
             except Exception as e:
-                print(f"\n❌ Tool Execution Failed: {e}")
+                print(f"\n Tool Execution Failed: {e}")
 
 if __name__ == "__main__":
     try:

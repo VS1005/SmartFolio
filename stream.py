@@ -15,7 +15,6 @@ from pandas.tseries.offsets import MonthBegin, MonthEnd
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# Import required functions from gen_data modules
 try:
     from gen_data.build_dataset_yf import (
         fetch_ohlcv_yf,
@@ -34,7 +33,6 @@ try:
 except ImportError:
     print("Warning: Could not import gen_data modules. Ensure paths are correct.")
 
-# Import main.py functions for direct fine-tuning
 try:
     from main import fine_tune_month
 except ImportError:
@@ -101,16 +99,14 @@ MANIFEST STRUCTURE:
 }
 """
 
-# Global variables
 counter = 0
 data_buffer = []  # Store the data for 30 days
 lock = Lock()  # A lock to synchronize both threads
 data_ready_event = threading.Event()  # Event to signal when data is ready for training
-current_date = None  # Track current date being processed
-tickers_list = []  # Store tickers
+current_date = None  
+tickers_list = []  
 market = ""  # Store market identifier
-args_global = None  # Store global args
-
+args_global = None  
 
 def _load_manifest_local(path: str) -> Dict[str, object]:
     """Load manifest from file."""
@@ -139,14 +135,12 @@ def get_next_trading_day(start_date: str, df_raw: pd.DataFrame) -> str:
         if pd.to_datetime(date_str) > current:
             return date_str
     
-    # If no future date found, return the next day
     return (pd.to_datetime(start_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def fetch_one_day_data_raw(tickers: List[str], date: str) -> pd.DataFrame:
     """Fetch raw OHLCV data for one specific day using yfinance directly (fast)."""
     try:
-        # Use yfinance directly without processing for speed
         date_next = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         import yfinance as yf
         df = yf.download(tickers, start=date, end=date_next, auto_adjust=False, group_by="ticker", progress=False)
@@ -171,8 +165,6 @@ def process_ohlcv_data(raw_dfs: List[pd.DataFrame]) -> pd.DataFrame:
     
     # Concatenate all raw dataframes
     df = pd.concat(raw_dfs, ignore_index=False)
-    
-    # Normalize to a tall dataframe
     if isinstance(df.columns, pd.MultiIndex):
         parts = []
         tickers = set()
@@ -193,10 +185,8 @@ def process_ohlcv_data(raw_dfs: List[pd.DataFrame]) -> pd.DataFrame:
         else:
             return pd.DataFrame()
     else:
-        # Single ticker case
         d = df.copy()
         d.columns = [c.lower() for c in d.columns]
-        # Infer ticker from index or use first ticker
         d["kdcode"] = d.get("kdcode", "UNKNOWN")
         tall = d.reset_index().rename(columns={"Date": "dt"})
     
@@ -206,17 +196,13 @@ def process_ohlcv_data(raw_dfs: List[pd.DataFrame]) -> pd.DataFrame:
     if missing:
         print(f"Warning: Missing columns {missing}, attempting to continue...")
     
-    # Compute prev_close per kdcode
     tall = tall.sort_values(["kdcode", "dt"]).reset_index(drop=True)
     tall["prev_close"] = tall.groupby("kdcode")["close"].shift(1)
     
-    # Drop first row per ticker where prev_close is NaN
     tall = tall.dropna(subset=["prev_close"]).copy()
     
-    # Cast dt to string YYYY-MM-DD
     tall["dt"] = pd.to_datetime(tall["dt"]).dt.strftime("%Y-%m-%d")
     
-    # Keep only needed columns
     cols_to_keep = ["kdcode", "dt", "close", "open", "high", "low", "prev_close", "volume"]
     tall = tall[[c for c in cols_to_keep if c in tall.columns]]
     
@@ -257,11 +243,8 @@ def fetch_data_thread(
 ):
     """Thread function to fetch 30 days of data incrementally (raw, then process)."""
     global counter, data_buffer, current_date
-    
-    # Load initial manifest to get the starting date
     manifest = _load_manifest_local(manifest_path)
     
-    # Load raw snapshot to get available tickers and dates
     try:
         raw_snapshot = cast(Optional[str], manifest.get("raw_snapshot"))
         raw_path = _find_latest_raw_snapshot(dataset_root, market_name)
@@ -270,10 +253,8 @@ def fetch_data_thread(
         print(f"Error loading raw snapshot: {e}")
         return
     
-    # Determine the next month to process
     next_month_start, next_month_end = _determine_next_month(manifest, df_raw)
     
-    # Get the starting date from manifest or use next month start
     last_trading_day = manifest.get("last_trading_day")
     if last_trading_day:
         last_trading_day_str = cast(str, last_trading_day)
@@ -283,14 +264,11 @@ def fetch_data_thread(
     
     print(f"Starting data fetch from {current_date.strftime('%Y-%m-%d')}")
     
-    # Fetch 30 days of raw data (FAST - no processing)
     counter = 0
     fetched_raw_data_list: List[pd.DataFrame] = []
     
     while counter < 6:
         date_str = current_date.strftime("%Y-%m-%d")
-        
-        # Fetch RAW data for this day (fast, minimal processing)
         day_raw_data = fetch_one_day_data_raw(tickers, date_str)
         
         if day_raw_data is not None and not day_raw_data.empty:
@@ -300,13 +278,9 @@ def fetch_data_thread(
         else:
             print(f"Skipping {date_str} (no data available)")
         
-        # Move to next day
         current_date += pd.Timedelta(days=1)
         
-        # Apply random delay between fetches
-        time.sleep(random.uniform(8, 12))  # Random delay between 8 and 12 seconds
-    
-    # Process all 30 days of fetched data (ONCE, after collection)
+        time.sleep(random.uniform(8, 12))  
     print("Processing collected raw data...")
     data_buffer = process_ohlcv_data(fetched_raw_data_list)
     
@@ -315,7 +289,6 @@ def fetch_data_thread(
     else:
         print("Warning: Processed data is empty")
     
-    # Acquire lock and signal that data is ready
     with lock:
         data_ready_event.set()
         print("Data fetch and processing complete. Signaling training thread...")
@@ -329,8 +302,6 @@ def training_thread(args: argparse.Namespace):
     2. Call fine_tune_month() to fine-tune PPO model on the latest shard
     """
     global data_buffer, counter
-    
-    # Wait for data to be ready
     print("Training thread waiting for data...")
     data_ready_event.wait()
     
@@ -339,20 +310,17 @@ def training_thread(args: argparse.Namespace):
         
         if isinstance(data_buffer, pd.DataFrame) and not data_buffer.empty:
             try:
-                # Step 1: Get the end date from the fetched data
                 fetched_end_date = data_buffer["dt"].max()
                 print(f"Fetched data date range: {data_buffer['dt'].min()} to {fetched_end_date}")
                 
-                # Step 2: Call run() with fetched data to create monthly shards
                 run(args, fetched=data_buffer, fetched_end_date=fetched_end_date)
                 print("run() completed successfully! Monthly shards created.")
                 
-                # Step 3: Clear data buffer to free memory before fine-tuning
                 data_buffer = pd.DataFrame()
                 import gc
-                gc.collect()  # Force garbage collection
+                gc.collect()
                 if torch.cuda.is_available():
-                    torch.cuda.empty_cache()  # Clear GPU cache
+                    torch.cuda.empty_cache()  
                 print("Memory cleared before fine-tuning...")
                 
                 # Step 4: Call fine_tune_month directly from main.py
@@ -418,7 +386,6 @@ def training_thread(args: argparse.Namespace):
                     import traceback
                     traceback.print_exc()
                 
-                # Step 5: Reset counter for next batch
                 counter = 0
                 data_ready_event.clear()
                 
@@ -475,10 +442,7 @@ def main(
     
     print(f"Using {len(tickers_list)} tickers: {tickers_list[:5]}..." if len(tickers_list) > 5 else f"Using {len(tickers_list)} tickers: {tickers_list}")
     
-    # Create args for training thread
-    # Include only attributes required for data generation and fine-tuning
     args_global = argparse.Namespace(
-        # Dataset building parameters (used by run())
         market=market_name,
         dataset_root=dataset_root,
         corr_root=corr_root,
@@ -492,7 +456,7 @@ def main(
         tickers_file=tickers_file,
         # Fine-tuning parameters (minimal set actually used by fine_tune_month)
         seed=123,
-        input_dim=6,  # Will be auto-detected from pickle files if needed
+        input_dim=6,
         save_dir="./checkpoints",
         model_name="SmartFolio",
         fine_tune_steps=5000,  # PPO learning timesteps for monthly updates
@@ -509,13 +473,9 @@ def main(
         args=(args_global,),
         daemon=False,
     )
-    
-    # Start the threads
     print("Starting fetch and training threads...")
     fetch_thread.start()
     train_thread.start()
-    
-    # Wait for both threads to complete
     fetch_thread.join()
     train_thread.join()
     

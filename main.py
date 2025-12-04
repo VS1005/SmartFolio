@@ -13,7 +13,6 @@ import torch
 print(torch.cuda.is_available())
 from dataloader.data_loader import *
 from policy.policy import *
-# from trainer.trainer import *
 from stable_baselines3 import PPO
 from trainer.irl_trainer import *
 from torch_geometric.loader import DataLoader
@@ -142,7 +141,6 @@ def _resolve_manifest_path(args, manifest_path: str | None) -> Path:
         if candidate.is_file():
             return candidate
         if not candidate.is_absolute():
-            # Try placing the provided filename inside the canonical dataset dir.
             alt = _default_manifest_path(args).with_name(candidate.name)
             if alt.is_file():
                 return alt
@@ -167,7 +165,6 @@ def load_finrag_prior(weights_path, num_stocks, tickers_csv="tickers.csv"):
     with open(weights_path, "r", encoding="utf-8") as fh:
         payload = json.load(fh)
 
-    # Unwrap common container keys
     if isinstance(payload, dict) and ("weights" in payload or "scores" in payload):
         payload = payload.get("weights") or payload.get("scores")
 
@@ -203,10 +200,7 @@ def load_finrag_prior(weights_path, num_stocks, tickers_csv="tickers.csv"):
 
 
 def init_policy_bias_from_prior(model, prior_weights):
-    """
-    Initialize the policy action head bias so the mean action roughly matches the prior.
-    Works for SB3 ActorCriticPolicy subclasses where action_net is a Linear layer.
-    """
+    
     if prior_weights is None:
         return
     policy = getattr(model, "policy", None)
@@ -264,9 +258,7 @@ def _infer_month_dates(shard):
     return month_label, month_start, month_end
 
 def select_replay_samples(model, env, dataset, k_percent=0.3):
-    """
-    Select top k% samples based on absolute reward magnitude (proxy for importance).
-    """
+    
     print("Selecting replay samples...")
     obs = env.reset()
     rewards = []
@@ -285,15 +277,12 @@ def select_replay_samples(model, env, dataset, k_percent=0.3):
         if done:
             break
             
-    # Sort by absolute reward descending
     step_rewards.sort(key=lambda x: x[1], reverse=True)
     
     # Select top k
     num_to_select = int(len(step_rewards) * k_percent)
     selected_indices = [x[0] for x in step_rewards[:num_to_select]]
     
-    # Retrieve data objects from dataset
-    # dataset.data_all is the list
     selected_samples = [dataset.data_all[i] for i in selected_indices if i < len(dataset.data_all)]
     
     print(f"Selected {len(selected_samples)} replay samples from {len(dataset)} total.")
@@ -468,7 +457,6 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
             ptr_mode=False,
         )
         prior_policy = prior_model.policy
-        # Load the "current" (trainable new policy)
         model = load_weights_into_new_model(
             checkpoint_path,
             env_init,
@@ -560,9 +548,6 @@ def train_predict(args, predict_dt):
                               drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=len(val_dataset), pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), pin_memory=True)
-    # print(len(train_loader), len(val_loader), len(test_loader))
-
-    # create or load model
     env_init = create_env_init(args, dataset=train_dataset)
     env_ref = env_init.envs[0] if hasattr(env_init, "envs") else env_init
     args.lookback = getattr(env_ref, "lookback", getattr(args, "lookback", 30))
@@ -578,13 +563,12 @@ def train_predict(args, predict_dt):
                         seed=args.seed,
                         device=args.device)
     elif args.policy == 'HGAT':
-        # Determine lookback from environment or args to ensure consistency
         lookback = getattr(env_init, 'lookback', getattr(args, 'lookback', 30))
         if hasattr(env_init, 'envs'):
              lookback = getattr(env_init.envs[0], 'lookback', lookback)
 
         policy_kwargs = dict(
-            last_layer_dim_pi=args.num_stocks,  # Should equal num_stocks for proper initialization
+            last_layer_dim_pi=args.num_stocks,
             last_layer_dim_vf=args.num_stocks,
             n_head=8,
             hidden_dim=128,
@@ -601,14 +585,12 @@ def train_predict(args, predict_dt):
                         **PPO_PARAMS,
                         seed=args.seed,
                         device=args.device)
-    # Initialize policy bias with FinRAG prior if available
     init_policy_bias_from_prior(model, getattr(args, "finrag_prior", None))
     train_model_and_predict(model, args, train_loader, val_loader, test_loader)
 
     # save_dir already includes risk score (e.g., checkpoints_risk05/)
     if getattr(args, "ptr_mode", False):
         print("Selecting initial replay samples from pre-training data...")
-        # Recreate the env with the full training set for selection
         env_selection = create_env_init(args, dataset=train_dataset)
         model.set_env(env_selection)
         
@@ -717,8 +699,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     args.market = 'custom'
-
-    # Handle aliases and config
     if getattr(args, "use_ptr", False):
         args.ptr_mode = True
 
@@ -729,13 +709,11 @@ if __name__ == '__main__':
         PPO_PARAMS["tensorboard_log"] = None
         print("TensorBoard logging disabled (--disable-tensorboard); PPO will not attempt to import tensorboard.")
 
-    # Default training range (override via CLI if desired)
     args.device = "cuda:0" if torch.cuda.is_available() else "cpu"
     args.model_name = 'SmartFolio'
     args.relation_type = getattr(args, "relation_type", "hy") or "hy"
     args.seed = 123
 
-    # Auto-detect input_dim (number of per-stock features) from a sample file
     try:
         data_dir_detect = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
         sample_files_detect = [f for f in os.listdir(data_dir_detect) if f.endswith('.pkl')]
@@ -747,11 +725,9 @@ if __name__ == '__main__':
             # Expect features shaped [T, num_stocks, input_dim]
             feats = sample_data_detect.get('features')
             if feats is not None:
-                # Handle both torch tensors and numpy arrays
                 try:
                     shape = feats.shape
                 except Exception:
-                    # If it's a torch tensor wrapped differently
                     try:
                         shape = feats.size()
                     except Exception:
@@ -776,10 +752,8 @@ if __name__ == '__main__':
     args.pos_yn = True
     args.neg_yn = True
     args.multi_reward = True
-    # Training hyperparameters (can be overridden via command line)
     args.irl_epochs = getattr(args, 'irl_epochs', 50)
     args.rl_timesteps = getattr(args, 'rl_timesteps', 10000)
-    # Risk-adaptive reward parameters
     args.risk_score = getattr(args, 'risk_score', 0.5)
     args.dd_base_weight = getattr(args, 'dd_base_weight', 1.0)
     args.dd_risk_factor = getattr(args, 'dd_risk_factor', 1.0)
@@ -790,7 +764,6 @@ if __name__ == '__main__':
             "expert_cache"
         )
 
-    # Auto-detect num_stocks from a sample pickle file
     data_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
     sample_files = [f for f in os.listdir(data_dir) if f.endswith('.pkl')]
     if sample_files:
@@ -804,7 +777,6 @@ if __name__ == '__main__':
     else:
         raise ValueError(f"No pickle files found in {data_dir} to determine num_stocks")
 
-    # Load FinRAG prior (if provided) once we know num_stocks
     args.finrag_prior = load_finrag_prior(args.finrag_weights_path, args.num_stocks)
 
     # Modify save_dir to include risk score (e.g., checkpoints -> checkpoints_risk05)
@@ -856,8 +828,6 @@ if __name__ == '__main__':
         try:
             ts = time.strftime('%Y%m%d_%H%M%S')
             out_path = os.path.join(args.save_dir, f"ppo_{args.policy.lower()}_{args.market}_{ts}")
-            # train_predict currently returns None; saving env-attached model is handled inside trainer
-            # If we had a handle, we could save here. Keep path ready for future.
             print(f"Training run complete. To save PPO model, call model.save('{out_path}') where model is your PPO instance.")
         except Exception as e:
             print(f"Skip saving PPO model here: {e}")
