@@ -23,8 +23,8 @@ dist/
 
 *_summary.md
 
-checkpoints/
-logs/
+checkpoints*/
+logs*/
 
 .DS_Store
 explainability_results/

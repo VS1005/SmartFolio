@@ -36,5 +36,5 @@ All tools share a common configuration dataclass mirroring `OrchestratorConfig`,
 
 ## Deployment Notes
 - `tools_mcp` will mirror the required files from `tools/` but may include MCP-specific wrappers.
-- Environment variables (e.g., `GOOGLE_API_KEY`) continue to be read at runtime; MCP server just surfaces missing-key errors through tool errors.
+- Environment variables (e.g., `OPENAI_API_KEY` or `LLM_PROVIDER`) continue to be read at runtime; MCP server just surfaces missing-key errors through tool errors.
 - Future extension: add streaming tokens from LLM calls as MCP progress messages if needed.

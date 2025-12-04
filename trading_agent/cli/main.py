@@ -33,7 +33,7 @@ def weight(
     ),
     llm_model: Optional[str] = typer.Option(
         None,
-        help="Override the model name when --llm is enabled (defaults to TRADINGAGENTS_LLM_MODEL or gemini-2.0-flash).",
+        help="Override the model name when --llm is enabled (defaults to TRADINGAGENTS_LLM_MODEL or gpt-4.1-mini).",
     ),
     as_of: Optional[str] = typer.Option(
         None,
@@ -85,7 +85,7 @@ def news_weight(
     ),
     llm_model: Optional[str] = typer.Option(
         None,
-        help="Override the model name when --llm is enabled (defaults to TRADINGAGENTS_LLM_MODEL or gemini-2.0-flash).",
+        help="Override the model name when --llm is enabled (defaults to TRADINGAGENTS_LLM_MODEL or gpt-4.1-mini).",
     ),
     as_of: Optional[str] = typer.Option(
         None,
@@ -147,7 +147,7 @@ def weight_summary(
     ),
     llm_model: Optional[str] = typer.Option(
         None,
-        help="Override the model name when --llm is enabled (defaults to gpt-4o-mini).",
+        help="Override the model name when --llm is enabled (defaults to gpt-4.1-mini).",
     ),
     as_of: Optional[str] = typer.Option(
         None,

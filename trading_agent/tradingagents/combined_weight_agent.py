@@ -33,10 +33,8 @@ class WeightSynthesisReport:
 		include_articles: bool = True,
 	) -> str:
 		header = (
-			f"# Combined Weight Review: {self.ticker}\n\n"
-			f"- **As of:** {self.as_of}\n"
-			f"- **Assigned Weight:** {self.weight:.2%}\n"
-			f"- **News Lookback:** {self.lookback_days} day(s)\n\n"
+			f"## {self.ticker} Weight Review\n"
+			f"As of {self.as_of} • Weight {self.weight:.2%} • News lookback {self.lookback_days}d\n\n"
 		)
 
 		summary_section = "\n".join(f"- {point}" for point in self.summary_points)
@@ -167,7 +165,7 @@ def _build_combined_report(
 
 	summary_points = _synthesise_summary(fundamental_report, news_report)
 	used_llm = False
-	if use_llm:
+		if use_llm:
 		fund_markdown = fundamental_report.to_markdown(include_metrics=True)
 		news_markdown = news_report.to_markdown(include_articles=True)
 		llm_points = summarise_weight_points(
@@ -178,7 +176,7 @@ def _build_combined_report(
 			news_points=news_report.points,
 			metrics_table=fund_markdown,
 			news_table=news_markdown,
-			max_points=len(summary_points) or 6,
+				max_points=len(summary_points) or 4,
 			model=llm_model,
 		)
 		if llm_points:
@@ -328,8 +326,8 @@ def _synthesise_summary(
 	fund_report: WeightReport,
 	news_report: NewsWeightReport,
 	*,
-	min_points: int = 5,
-	max_points: int = 6,
+	min_points: int = 3,
+	max_points: int = 4,
 ) -> List[str]:
 	summary: List[str] = []
 	seen = set()

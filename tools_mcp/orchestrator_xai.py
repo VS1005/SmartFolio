@@ -40,6 +40,7 @@ RUN_XAI_SCHEMA = {
         "llm_model": {"type": "string"},
         "output_dir": {"type": "string"},
         "monthly_run_id": {"type": "string"},
+        "latent":{"type": "boolean"},
     },
     "required": ["date", "monthly_log_csv", "model_path", "lookback_days", "top_k", "market", "data_root", "output_dir", "monthly_run_id", "llm", "llm_model"],
 }

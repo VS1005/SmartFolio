@@ -15,7 +15,7 @@ DEFAULT_ARGS = {
     "monthly_run_id": None,
     "output_dir": "explainability_results",
     "llm": True,
-    "llm_model": "gemini-2.0-flash"
+    "llm_model": "gpt-4.1-mini"
 }
 
 def get_user_input(current_args):

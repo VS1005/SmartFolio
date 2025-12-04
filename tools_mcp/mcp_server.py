@@ -8,8 +8,6 @@ from typing import Any, Dict, Iterable, Optional, Type
 
 import pathway as pw
 pw.set_license_key('AE5CE3-7C24AE-8E3086-4D5E3E-CE4966-V3')
-import os
-os.environ["GOOGLE_API_KEY"] = "AIzaSyDUW_zkU6Zz5BEMiDGtEpmqaGVvy-Dr4R0"
 
 from .registry import ToolDefinition, iter_tools
 

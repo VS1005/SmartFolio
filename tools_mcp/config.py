@@ -18,7 +18,7 @@ class XAIRequest:
     top_k: int = 5
     lookback_days: int = 60
     llm: bool = False
-    llm_model: str = "gemini-2.0-flash"
+    llm_model: str = "gpt-4.1-mini"
     output_dir: str | Path = "explainability_results"
     monthly_run_id: Optional[str] = None
 

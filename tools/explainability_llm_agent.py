@@ -1,11 +1,26 @@
 from __future__ import annotations
-import argparse, json, os, sys, time
+
+import argparse
+import json
+import os
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
-import numpy as np
+
 import joblib
-import google.generativeai as genai
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+TRADING_AGENT_ROOT = REPO_ROOT / "trading_agent"
+if TRADING_AGENT_ROOT.exists() and str(TRADING_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(TRADING_AGENT_ROOT))
+
+from tradingagents.llm_provider import ProviderError, generate_completion
 
 SYSTEM_PROMPT = ("""
 You are a Financial Analyst writing a simplified newsletter for retail investors. Your goal is to explain an AI's trading strategy in plain English, removing all technical jargon.
@@ -39,9 +54,6 @@ For each stock, provide exactly this structure:
 **[Stock Name]**
 * **The Strategy**: [A catchy 3-6 word summary, e.g., "Momentum Play backed by Sector Peers"]
 * **The Logic**: [A plain-English paragraph explaining *why*. E.g., "The model is buying this stock because it sees a massive volume spike in its peer, Tata Steel. It seems to be hedging against weakness in the broader market, only buying when the sector is quiet."]
-* **Key Signals to Watch**:
-    * [Related Stock]: [What to look for, e.g., "High Volume"]
-    * [Related Stock]: [What to look for, e.g., "Price Drop"]
 
 """)
 
@@ -52,10 +64,10 @@ class SnapshotContext:
     filtered_data: Dict[str, object]
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Generate SmartFolio explainability narrative (Gemini 2.0 Flash).")
+    p = argparse.ArgumentParser(description="Generate SmartFolio explainability narrative via LLM provider.")
     p.add_argument("--snapshot", default="explainability_results/explain_tree_custom.joblib")
-    p.add_argument("--llm", action="store_true", help="Enable Gemini generation")
-    p.add_argument("--llm-model", default="gemini-2.0-flash", help="LLM model name")
+    p.add_argument("--llm", action="store_true", help="Enable LLM generation")
+    p.add_argument("--llm-model", default="gpt-4.1-mini", help="LLM model name")
     p.add_argument("--output", default="explainability_results/explainability_narrative.md")
     p.add_argument("--print", action="store_true")
     return p.parse_args()
@@ -88,14 +100,17 @@ def load_snapshot(path: Path) -> SnapshotContext:
         raise TypeError("Joblib file must contain a dict.")
 
     keep = ["per_stock", "avg_weights", "top_indices", "global_r2", "X_shape", "Y_shape"]
-    filtered = {k: data.get(k) for k in keep if k in data}
+    filtered: Dict[str, object] = {}
+    for k in keep:
+        if k in data and data[k] is not None:
+            filtered[k] = data[k]
 
     meta = {"model_path": str(path), "included_keys": list(filtered.keys())}
     return SnapshotContext(metadata=meta, filtered_data=filtered)
 
 def assemble_prompt(ctx: SnapshotContext) -> str:
     """
-    Builds a structured Gemini-optimized prompt emphasizing narrative over data.
+    Builds a structured LLM-ready prompt emphasizing narrative over data.
     """
 
     example_block = (
@@ -103,9 +118,7 @@ def assemble_prompt(ctx: SnapshotContext) -> str:
         "**ICICIBANK.NS**\n"
         "* **The Strategy**: Sector Rotation based on Peers\n"
         "* **The Logic**: The model is aggressively buying ICICI Bank because it sees a major volume spike in SBI. It uses this as a confirmation signal for the entire banking sector. It avoids this trade if Infosys is also crashing, treating that as a broader market risk.\n"
-        "* **Key Signals to Watch**:\n"
-        "    * SBIN.NS: High Volume\n"
-        "    * INFY.NS: Price Drop\n\n"
+        "\n"
     )
 
     instructions = (
@@ -126,36 +139,42 @@ def assemble_prompt(ctx: SnapshotContext) -> str:
 
     return json.dumps(convert_keys_to_str(payload), indent=2, default=safe_convert)
 
-def llm_narrative(prompt: str, model="gemini-2.0-flash", retries=3, delay=4) -> str:
-    key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    if not key:
-        raise RuntimeError("Missing GOOGLE_API_KEY / GEMINI_API_KEY.")
-    genai.configure(api_key=key)
-    llm = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_PROMPT)
-
+def llm_narrative(prompt: str, model="gpt-4.1-mini", retries=3, delay=4) -> str:
+    last_error: Optional[Exception] = None
     for attempt in range(1, retries + 1):
         try:
-            print(f"[INFO] Gemini 2.0 Flash call attempt {attempt}/{retries}")
-            resp = llm.generate_content(prompt, generation_config={"temperature": 0.4, "top_p": 0.9})
-            text = getattr(resp, "text", None)
-            if text:
-                return text.strip()
-            raise RuntimeError("Empty Gemini response")
-        except Exception as e:
-            msg = str(e)
-            if "429" in msg and attempt < retries:
-                print(f"[WARN] Rate limited (429). Retrying in {delay}s…")
+            print(f"[INFO] LLM call attempt {attempt}/{retries}")
+            return generate_completion(
+                prompt,
+                system_prompt=SYSTEM_PROMPT,
+                model=model,
+                temperature=0.4,
+                top_p=0.9,
+            )
+        except ProviderError as exc:
+            last_error = exc
+            message = str(exc)
+            if "429" in message and attempt < retries:
+                print(f"[WARN] Rate limited. Retrying in {delay}s…")
                 time.sleep(delay)
                 continue
-            print(f"[ERROR] Gemini call failed: {e}")
-            return f"**LLM generation failed:** {e}"
-    return "**LLM generation unavailable.**"
+            print(f"[ERROR] LLM call failed: {exc}")
+            return f"**LLM generation failed:** {exc}"
+    return f"**LLM generation unavailable:** {last_error}" if last_error else "**LLM generation unavailable.**"
 
 def fallback_narrative(ctx: SnapshotContext) -> str:
     d = ctx.filtered_data
+    per_stock = d.get("per_stock")
+    if isinstance(per_stock, dict):
+        stock_count = len(per_stock)
+    elif isinstance(per_stock, (list, tuple)):
+        stock_count = len(per_stock)
+    else:
+        stock_count = 0
+
     return (
         f"Fallback summary — global R² {d.get('global_r2','n/a')}, "
-        f"{len(d.get('per_stock',{}))} stocks analyzed. "
+        f"{stock_count} stocks analyzed. "
         "Detailed logic requires LLM generation."
     )
 
@@ -176,6 +195,14 @@ def main() -> None:
     print(f"[INFO] Prompt saved → {prompt_path}")
 
     if args.llm:
+        if not any(
+            os.environ.get(var)
+            for var in ("OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY")
+        ):
+            print(
+                "[WARN] --llm set but no API key detected; export OPENAI_API_KEY or configure LLM_PROVIDER.",
+                file=sys.stderr,
+            )
         output_text = llm_narrative(prompt, model=args.llm_model)
     else:
         output_text = fallback_narrative(ctx)

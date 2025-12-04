@@ -12,7 +12,7 @@ Usage:
       --include-components \
       --print-summaries \
       --llm \
-      --llm-model gemini-2.0-flash
+    --llm-model gpt-4.1-mini
 """
 
 from __future__ import annotations
@@ -188,12 +188,12 @@ def parse_args():
     p.add_argument(
         "--llm",
         action="store_true",
-        help="Enable LLM synthesis via Gemini 2.0 Flash for the unified summary.",
+        help="Enable LLM synthesis via the configured provider (OpenAI by default).",
     )
     p.add_argument(
         "--llm-model",
-        default="gemini-2.0-flash",
-        help="Gemini model name (default: gemini-2.0-flash).",
+        default="gpt-4.1-mini",
+        help="LLM model name (default: gpt-4.1-mini).",
     )
     p.add_argument(
         "--max-workers",
@@ -316,7 +316,7 @@ def main():
             console.print(Markdown(output))
             console.print(f"[dim]Saved: {path}[/dim]")
             if via_llm:
-                console.print("[dim green]Generated via LLM (Gemini 2.0 Flash)[/dim]\n")
+                console.print("[dim green]Generated via LLM provider[/dim]\n")
 
     # Write summary index CSV
     summary_data = [

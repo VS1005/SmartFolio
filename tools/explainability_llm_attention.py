@@ -3,7 +3,7 @@ SmartFolio HGAT Attention-Only Explainability
 ==============================================
 
 This script reads a JSON file that contains only the "attention_summary"
-key and produces a Gemini 2.0 Flash–optimized interpretation.
+key and produces an LLM-optimized interpretation via the configured provider.
 
 It explains:
 - Semantic attention distributions
@@ -14,10 +14,26 @@ Output: Markdown narrative saved to `explainability_results/hgat_attention_narra
 """
 
 from __future__ import annotations
-import argparse, json, os, sys, time
+
+import argparse
+import json
+import os
+import sys
+import time
 from pathlib import Path
+from typing import Optional
+
 import numpy as np
-import google.generativeai as genai
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+TRADING_AGENT_ROOT = REPO_ROOT / "trading_agent"
+if TRADING_AGENT_ROOT.exists() and str(TRADING_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(TRADING_AGENT_ROOT))
+
+from tradingagents.llm_provider import ProviderError, generate_completion
 
 SYSTEM_PROMPT = (
     "You are a quantitative explainability analyst specializing in graph-based models. "
@@ -28,7 +44,7 @@ SYSTEM_PROMPT = (
 )
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Explain HGAT attention summary JSON using Gemini 2.0 Flash.")
+    p = argparse.ArgumentParser(description="Explain HGAT attention summary JSON using the configured LLM provider.")
     p.add_argument(
         "--attention-json",
         required=True,
@@ -37,12 +53,12 @@ def parse_args():
     p.add_argument(
         "--llm",
         action="store_true",
-        help="Enable Gemini 2.0 Flash for generating the explanation.",
+        help="Enable provider-backed LLM generation (OpenAI by default).",
     )
     p.add_argument(
         "--llm-model",
-        default="gemini-2.0-flash",
-        help="Gemini model name (default: gemini-2.0-flash).",
+        default="gpt-4.1-mini",
+        help="LLM model name (default: gpt-4.1-mini).",
     )
     p.add_argument(
         "--output",
@@ -151,29 +167,28 @@ def assemble_prompt(attn_summary: dict) -> str:
 
     return json.dumps(payload, indent=2)
 
-def llm_generate(prompt: str, model="gemini-2.0-flash", retries=3, delay=5) -> str:
-    key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if not key:
-        raise RuntimeError("Missing GOOGLE_API_KEY or GEMINI_API_KEY.")
-    genai.configure(api_key=key)
-
-    llm = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_PROMPT)
+def llm_generate(prompt: str, model="gpt-4.1-mini", retries=3, delay=5) -> str:
+    last_error: Optional[Exception] = None
     for attempt in range(1, retries + 1):
         try:
-            print(f"[INFO] Generating explanation with Gemini ({attempt}/{retries})...")
-            resp = llm.generate_content(prompt, generation_config={"temperature": 0.3, "top_p": 0.9})
-            if hasattr(resp, "text") and resp.text:
-                return resp.text.strip()
-            raise RuntimeError("Empty response from LLM.")
-        except Exception as e:
-            msg = str(e)
-            if "429" in msg and attempt < retries:
+            print(f"[INFO] Generating explanation with LLM ({attempt}/{retries})...")
+            return generate_completion(
+                prompt,
+                system_prompt=SYSTEM_PROMPT,
+                model=model,
+                temperature=0.3,
+                top_p=0.9,
+            )
+        except ProviderError as exc:
+            last_error = exc
+            message = str(exc)
+            if "429" in message and attempt < retries:
                 print(f"[WARN] Rate limited, retrying in {delay}s...")
                 time.sleep(delay)
                 continue
-            print(f"[ERROR] Gemini call failed: {e}")
-            return f"**LLM generation failed:** {e}"
-    return "**LLM unavailable.**"
+            print(f"[ERROR] LLM call failed: {exc}")
+            return f"**LLM generation failed:** {exc}"
+    return f"**LLM unavailable:** {last_error}" if last_error else "**LLM unavailable.**"
 
 def main():
     args = parse_args()
@@ -194,6 +209,14 @@ def main():
     prompt_path.write_text(prompt, encoding="utf-8")
     print(f"[INFO] Prompt saved at {prompt_path}")
     if args.llm:
+        if not any(
+            os.environ.get(var)
+            for var in ("OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY")
+        ):
+            print(
+                "[WARN] --llm enabled but no API key detected; export OPENAI_API_KEY or configure LLM_PROVIDER.",
+                file=sys.stderr,
+            )
         narrative = llm_generate(prompt, model=args.llm_model)
     else:
         narrative = f"Loaded HGAT attention summary for model: {attn_summary.get('model_path', 'N/A')}"

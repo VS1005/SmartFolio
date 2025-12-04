@@ -643,6 +643,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         if idx is None:
             print(f"[WARN] Focus ticker {symbol} not found in dataset mapping; skipping.")
             continue
+        if idx >= args.num_stocks:
+            print(f"[WARN] Ticker {symbol} maps to index {idx}, but dataset only has {args.num_stocks} stocks. Skipping.")
+            continue
         if idx not in focus_indices:
             focus_indices.append(idx)
 

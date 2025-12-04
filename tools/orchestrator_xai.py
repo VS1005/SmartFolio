@@ -12,8 +12,6 @@ from typing import Dict, List, Optional
 
 import joblib
 import pandas as pd
-import os
-os.environ["GOOGLE_API_KEY"] = "AIzaSyDUW_zkU6Zz5BEMiDGtEpmqaGVvy-Dr4R0"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -28,11 +26,15 @@ from tools import explain_tree as explain_tree_mod
 from tools import explainability_llm_agent as llm_agent_mod
 from tools import explainability_llm_attention as llm_attn_mod
 from tradingagents.combined_weight_agent import WeightSynthesisAgent
+from tools import explain_latent as explain_latent_mod
+from tradingagents.llm_provider import ProviderError, generate_completion
 
 FINAL_SYSTEM_PROMPT = (
     "You are a senior portfolio strategist. Combine multiple explainability artefacts "
     "(agent summary, decision-tree rules, attention relationships) into one concise note per stock. "
-    "Highlight why the model likes the stock, cite key drivers, and flag any risks."
+    "Highlight why the model likes the stock, cite key drivers, and flag any risks. "
+    "Use at most three short bullet points (under 120 total words) per ticker. "
+    "Do not offer to perform tasks, monitoring, or future services—only describe current evidence and implications."
 )
 
 
@@ -56,6 +58,7 @@ class OrchestratorConfig:
     llm_model: str
     output_dir: Path
     monthly_run_id: Optional[str]
+    latent: bool = True
 
 
 def rolling_window(date_str: str, lookback_days: int) -> tuple[str, str]:
@@ -324,19 +327,47 @@ def _extract_attention_edges(summary: Dict[str, object], ticker: str) -> List[Di
     return edges
 
 
-def _call_final_llm(prompt: str, model: str) -> str:
-    import google.generativeai as genai
+def run_latent_module(cfg: OrchestratorConfig, start_date: str, end_date: str, out_dir: Path) -> Dict[str, object]:
+    """
+    Executes the Sparse Autoencoder pipeline via tools.explain_latent.
+    """
+    if not getattr(cfg, "latent", False):
+        return {}
 
-    key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    if not key:
-        raise RuntimeError("GOOGLE_API_KEY / GEMINI_API_KEY missing for final LLM synthesis")
-    genai.configure(api_key=key)
-    llm = genai.GenerativeModel(model_name=model, system_instruction=FINAL_SYSTEM_PROMPT)
-    resp = llm.generate_content(prompt, generation_config={"temperature": 0.35, "top_p": 0.9})
-    text = getattr(resp, "text", None)
-    if not text:
-        raise RuntimeError("Final LLM returned empty response")
-    return text.strip()
+    print(f"Running latent factor analysis for {start_date} → {end_date}")
+    latent_dir = out_dir / "latent_factors"
+    
+    try:
+        from tools import explain_latent as explain_latent_mod
+        
+        result = explain_latent_mod.run_latent_pipeline(
+            model_path=cfg.model_path,
+            market=cfg.market,
+            start_date=start_date,
+            end_date=end_date,
+            data_root=cfg.data_root,
+            output_dir=latent_dir,
+            device="cpu",
+            # [NEW] Pass LLM config to enable smart labeling
+            llm=cfg.llm,
+            llm_model=cfg.llm_model
+        )
+        return result
+    except Exception as exc:
+        print(f"[WARN] Latent factor analysis failed: {exc}")
+        return {"success": False, "error": str(exc)}
+
+def _call_final_llm(prompt: str, model: str) -> str:
+    try:
+        return generate_completion(
+            prompt,
+            system_prompt=FINAL_SYSTEM_PROMPT,
+            model=model,
+            temperature=0.35,
+            top_p=0.9,
+        )
+    except ProviderError as exc:
+        raise RuntimeError(f"Final LLM failed: {exc}") from exc
 
 
 def _final_prompt_payload(
@@ -434,6 +465,7 @@ def render_dashboard(
     final_reports: List[Dict[str, object]],
     tree_text: Optional[str],
     attention_text: Optional[str],
+    latent_text: Optional[str] = None,
 ) -> None:
     for rank, holding in enumerate(holdings, start=1):
         print(f"{rank:02d}. {holding.ticker:<8} | weight {holding.weight*100:.2f}% | as_of {holding.as_of or 'n/a'}")
@@ -444,6 +476,9 @@ def render_dashboard(
     if attention_text:
         print("\nAttention Narrative:")
         print(attention_text)
+    if latent_text:
+        print("\nLatent Factors Summary:")
+        print(latent_text)
 
     trading_map = {row.get("ticker"): row for row in trading_rows}
     final_map = {row.get("ticker"): row for row in final_reports}
@@ -453,8 +488,10 @@ def render_dashboard(
         final = final_map.get(holding.ticker)
         print(f"\n>>> {holding.ticker} — target {holding.weight*100:.2f}%")
         if trade and trade.get("success"):
-            for point in trade.get("summary_points") or []:
-                print(f"   - {point}")
+            summary_points = trade.get("summary_points")
+            if isinstance(summary_points, list):
+                for point in summary_points:
+                    print(f"   - {point}")
             print(f"   report: {trade.get('output_path')}")
         elif trade:
             print(f"   trading agent failed: {trade.get('error','unknown')}")
@@ -478,6 +515,7 @@ def write_final_markdown(
     trading_rows: List[Dict[str, object]],
     final_reports: List[Dict[str, object]],
     destination: Path,
+    latent_text: Optional[str]=None,
 ) -> None:
     trading_map = {row.get("ticker"): row for row in trading_rows}
     final_map = {row.get("ticker"): row for row in final_reports}
@@ -494,14 +532,20 @@ def write_final_markdown(
     lines.append("\n## Attention Narrative")
     lines.append(attention_text or "(attention narrative unavailable)")
 
+    if latent_text:
+        lines.append("\n## Latent Factors")
+        lines.append(latent_text)
+
     lines.append("\n## Per-Stock Insights")
     for holding in holdings:
         lines.append(f"\n### {holding.ticker}")
         trade = trading_map.get(holding.ticker)
         if trade and trade.get("success"):
             lines.append("**Trading Agent Highlights**")
-            for point in trade.get("summary_points") or []:
-                lines.append(f"- {point}")
+            summary_points = trade.get("summary_points")
+            if isinstance(summary_points, list):
+                for point in summary_points:
+                    lines.append(f"- {point}")
             lines.append(f"Report: {trade.get('output_path')}")
         elif trade:
             lines.append(f"Trading agent failed: {trade.get('error','unknown')}")
@@ -530,6 +574,7 @@ def write_index_file(
     tree_narrative: Optional[Path],
     attention_summary: Optional[Path],
     attention_narrative: Optional[Path],
+    latent_result: Optional[Dict[str, object]],
     final_markdown: Path,
     destination: Path,
 ) -> None:
@@ -541,6 +586,7 @@ def write_index_file(
         "holdings": [holding.__dict__ for holding in holdings],
         "trading_agents": trading_rows,
         "final_reports": final_reports,
+        "latent_result": latent_result,
         "artifacts": {
             "tree_snapshot": str(tree_snapshot) if tree_snapshot and tree_snapshot.exists() else None,
             "tree_narrative": str(tree_narrative) if tree_narrative else None,
@@ -562,6 +608,7 @@ def run_orchestrator(cfg: OrchestratorConfig) -> None:
 
     attention_summary_path = run_attention_viz_module(cfg, window_start, window_end, out_dir)
     tree_snapshot_path = run_explain_tree_module(cfg, window_start, window_end, out_dir)
+    latent_result = run_latent_module(cfg, window_start, window_end, out_dir)
 
     tree_narrative_path = generate_tree_narrative(cfg, tree_snapshot_path, out_dir)
     attention_narrative_path = generate_attention_narrative(cfg, attention_summary_path, out_dir)
@@ -570,6 +617,7 @@ def run_orchestrator(cfg: OrchestratorConfig) -> None:
 
     per_stock_tree = _load_tree_per_stock(tree_snapshot_path)
     attn_summary_payload = _load_attention_summary_json(attention_summary_path)
+    
     final_reports = build_final_reports(
         summary_rows=trading_rows,
         tree_snapshot=tree_snapshot_path,
@@ -582,6 +630,7 @@ def run_orchestrator(cfg: OrchestratorConfig) -> None:
 
     tree_text = _read_text(tree_narrative_path)
     attention_text = _read_text(attention_narrative_path)
+    latent_text = latent_result.get("summary_md")
 
     render_dashboard(
         cfg=cfg,
@@ -590,6 +639,7 @@ def run_orchestrator(cfg: OrchestratorConfig) -> None:
         final_reports=final_reports,
         tree_text=tree_text,
         attention_text=attention_text,
+        latent_text=latent_text,  # Pass latent summary to dashboard
     )
 
     final_md_path = out_dir / "explainability_final_results.md"
@@ -598,6 +648,7 @@ def run_orchestrator(cfg: OrchestratorConfig) -> None:
         holdings=holdings,
         tree_text=tree_text,
         attention_text=attention_text,
+        latent_text=latent_text,  # Pass latent summary to markdown
         trading_rows=trading_rows,
         final_reports=final_reports,
         destination=final_md_path,
@@ -613,6 +664,7 @@ def run_orchestrator(cfg: OrchestratorConfig) -> None:
         tree_narrative=tree_narrative_path,
         attention_summary=attention_summary_path,
         attention_narrative=attention_narrative_path,
+        latent_result=latent_result,  # Persist latent artifacts in index
         final_markdown=final_md_path,
         destination=index_path,
     )
@@ -624,12 +676,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--monthly-log-csv", required=True, help="Path to monthly final_test_weights CSV")
     parser.add_argument("--monthly-run-id", default=None, help="Optional run_id filter when CSV tracks multiple runs")
     parser.add_argument("--model-path", required=True, help="Path to trained PPO checkpoint")
-    parser.add_argument("--market", default="hs300")
+    parser.add_argument("--market", default="custom")
     parser.add_argument("--data-root", default="dataset_default")
     parser.add_argument("--top-k", type=int, default=5, help="Number of holdings to explain (default 5)")
-    parser.add_argument("--lookback-days", type=int, default=60, help="Days before --date for explainability datasets")
+    parser.add_argument("--lookback-days", type=int, default=30, help="Days before --date for explainability datasets")
     parser.add_argument("--llm", action="store_true", help="Enable LLM generation for narratives")
-    parser.add_argument("--llm-model", default="gemini-2.0-flash")
+    parser.add_argument("--latent", action="store_true", help="Enable latent factor analysis")
+    parser.add_argument("--llm-model", default="gpt-4.1-mini")
     parser.add_argument("--output-dir", default="explainability_results")
     return parser.parse_args()
 
